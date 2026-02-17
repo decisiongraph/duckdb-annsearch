@@ -109,6 +109,28 @@ SELECT count(*) FROM ann_search('docs', 'docs_idx', [1.0, 0.0, 0.0], 2);
 ----
 2
 
+# ========================================
+# ann_search_batch: multiple queries at once
+# ========================================
+
+# Batch search with 2 queries, k=2 each
+# DiskANN returns squared L2 distances
+query IIR
+SELECT query_idx, id, _distance
+FROM ann_search_batch('docs', 'docs_idx', [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], 2)
+ORDER BY query_idx, _distance, id;
+----
+0	1	0.0
+0	4	0.5
+1	2	0.0
+1	5	0.5
+
+# Batch search: verify total result count = num_queries * k
+query I
+SELECT count(*) FROM ann_search_batch('docs', 'docs_idx', [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], 2);
+----
+6
+
 # Clean up
 statement ok
 DROP INDEX docs_idx;
