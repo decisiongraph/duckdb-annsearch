@@ -13,6 +13,7 @@
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -170,7 +171,7 @@ static bool HasFilterBetween(LogicalOperator &op) {
 }
 
 // Extract query vector from a constant expression (ARRAY or LIST of FLOAT)
-static bool ExtractQueryVector(const BoundConstantExpression &const_expr, vector<float> &out) {
+static bool ExtractQueryVectorFromConstant(const BoundConstantExpression &const_expr, vector<float> &out) {
 	auto &val = const_expr.value;
 	if (val.type().id() == LogicalTypeId::ARRAY) {
 		auto &children = ArrayValue::GetChildren(val);
@@ -189,12 +190,47 @@ static bool ExtractQueryVector(const BoundConstantExpression &const_expr, vector
 	return false;
 }
 
+// Extract query vector from a list_value/array_value function call with all-constant args
+static bool ExtractQueryVectorFromFunction(const BoundFunctionExpression &func, vector<float> &out) {
+	auto &name = func.function.name;
+	if (name != "list_value" && name != "array_value") {
+		return false;
+	}
+	for (auto &child : func.children) {
+		if (child->type != ExpressionType::VALUE_CONSTANT) {
+			return false;
+		}
+		auto &c = child->Cast<BoundConstantExpression>();
+		out.push_back(c.value.GetValue<float>());
+	}
+	return !out.empty();
+}
+
+// Extract query vector from any expression (constant, function call, or cast wrapper)
+static bool ExtractQueryVector(Expression &expr, vector<float> &out) {
+	auto *e = &expr;
+	// Unwrap casts
+	while (e->type == ExpressionType::OPERATOR_CAST) {
+		e = e->Cast<BoundCastExpression>().child.get();
+	}
+	if (e->type == ExpressionType::VALUE_CONSTANT) {
+		return ExtractQueryVectorFromConstant(e->Cast<BoundConstantExpression>(), out);
+	}
+	if (e->type == ExpressionType::BOUND_FUNCTION) {
+		return ExtractQueryVectorFromFunction(e->Cast<BoundFunctionExpression>(), out);
+	}
+	return false;
+}
+
 // Find an ANN index on a table that covers a specific column and is compatible
 // with the given distance function's required metric.
 struct FoundIndex {
 	string name;
 	bool is_diskann = true;
 	string metric = "L2";
+	string index_type; // Flat, HNSW, IVFFlat (FAISS) or DiskANN
+	int32_t nprobe = 1;
+	bool gpu = false;
 };
 
 // Map distance function name to required index metric
@@ -253,11 +289,16 @@ static bool FindAnnIndex(ClientContext &context, DuckTableEntry &duck_table, col
 	// Bind indexes and find one with a compatible metric
 	for (auto &cand : candidates) {
 		string metric;
+		string index_type;
+		int32_t nprobe = 1;
+		bool gpu = false;
 		if (cand.is_diskann) {
 			indexes.Bind(context, table_info, DiskannIndex::TYPE_NAME);
 			auto idx_ptr = indexes.Find(cand.name);
 			if (idx_ptr) {
-				metric = idx_ptr->Cast<DiskannIndex>().GetMetric();
+				auto &di = idx_ptr->Cast<DiskannIndex>();
+				metric = di.GetMetric();
+				index_type = "DiskANN";
 			}
 		}
 #ifdef FAISS_AVAILABLE
@@ -265,7 +306,11 @@ static bool FindAnnIndex(ClientContext &context, DuckTableEntry &duck_table, col
 			indexes.Bind(context, table_info, FaissIndex::TYPE_NAME);
 			auto idx_ptr = indexes.Find(cand.name);
 			if (idx_ptr) {
-				metric = idx_ptr->Cast<FaissIndex>().GetMetric();
+				auto &fi = idx_ptr->Cast<FaissIndex>();
+				metric = fi.GetMetric();
+				index_type = fi.GetFaissType();
+				nprobe = fi.GetNprobe();
+				gpu = fi.GetGpu();
 			}
 		}
 #endif
@@ -273,6 +318,9 @@ static bool FindAnnIndex(ClientContext &context, DuckTableEntry &duck_table, col
 			result.name = cand.name;
 			result.is_diskann = cand.is_diskann;
 			result.metric = metric;
+			result.index_type = index_type;
+			result.nprobe = nprobe;
+			result.gpu = gpu;
 			return true;
 		}
 	}
@@ -329,17 +377,22 @@ static bool TryOptimizeOrderBy(ClientContext &context, unique_ptr<LogicalOperato
 		return false;
 	}
 
-	// Identify column ref and constant among the two arguments
+	// Identify column ref and query vector among the two arguments.
+	// Unwrap CAST expressions and handle list_value/array_value functions.
 	Expression *col_child = nullptr;
-	Expression *const_child = nullptr;
+	Expression *vec_child = nullptr;
 	for (auto &child : func_expr.children) {
-		if (child->type == ExpressionType::BOUND_COLUMN_REF) {
-			col_child = child.get();
-		} else if (child->type == ExpressionType::VALUE_CONSTANT) {
-			const_child = child.get();
+		auto *expr = child.get();
+		while (expr->type == ExpressionType::OPERATOR_CAST) {
+			expr = expr->Cast<BoundCastExpression>().child.get();
+		}
+		if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+			col_child = expr;
+		} else {
+			vec_child = child.get(); // keep original (with cast) for extraction
 		}
 	}
-	if (!col_child || !const_child) {
+	if (!col_child || !vec_child) {
 		return false;
 	}
 
@@ -383,22 +436,32 @@ static bool TryOptimizeOrderBy(ClientContext &context, unique_ptr<LogicalOperato
 
 	// Extract the query vector
 	vector<float> query_vector;
-	if (!ExtractQueryVector(const_child->Cast<BoundConstantExpression>(), query_vector)) {
+	if (!ExtractQueryVector(*vec_child, query_vector)) {
 		return false;
 	}
 
-	// Cost estimation: skip ANN index if limit is too large relative to table size
+	// Cost estimation: skip ANN index if table is too small or limit is too large
 	auto estimated_cardinality = target_get->EstimateCardinality(context);
-	if (limit_val > 0 && estimated_cardinality > 0 && limit_val > estimated_cardinality / 10) {
-		return false; // Full scan likely faster when fetching >10% of table
+	if (estimated_cardinality > 0 && estimated_cardinality < 50) {
+		return false; // Full scan is cheap for small tables
+	}
+	if (limit_val > 0 && estimated_cardinality > 0) {
+		double threshold = 0.1; // default: 10%
+		if (found_idx.is_diskann || found_idx.index_type == "HNSW") {
+			threshold = 0.3; // graph indexes efficient up to ~30%
+		}
+		if (limit_val > static_cast<idx_t>(estimated_cardinality * threshold)) {
+			return false;
+		}
 	}
 
 	// Set limit: use the provided limit_val, or default to a reasonable number
 	idx_t k = (limit_val > 0) ? limit_val : 100;
 
-	// If there's a FILTER in the plan, overfetch to compensate for filtered-out rows
+	// In pre-optimization mode, skip filtered queries — the ANN index scan
+	// replacement would break the column mapping for the FILTER node.
 	if (HasFilterBetween(projection)) {
-		k = MaxValue<idx_t>(k * 3, k + 100);
+		return false;
 	}
 
 	// Build the replacement bind data
@@ -414,7 +477,9 @@ static bool TryOptimizeOrderBy(ClientContext &context, unique_ptr<LogicalOperato
 	memcpy(bind_data->query_vector.get(), query_vector.data(), query_vector.size() * sizeof(float));
 
 	for (auto &cid : col_ids) {
-		bind_data->storage_ids.emplace_back(StorageIndex(cid.GetPrimaryIndex()));
+		if (!cid.IsRowIdColumn()) {
+			bind_data->storage_ids.emplace_back(StorageIndex(cid.GetPrimaryIndex()));
+		}
 	}
 
 	// Replace the seq_scan function with our ANN index scan
@@ -425,8 +490,20 @@ static bool TryOptimizeOrderBy(ClientContext &context, unique_ptr<LogicalOperato
 	target_get->estimated_cardinality = k;
 
 	// EXPLAIN visibility: show optimizer rewrite details
-	target_get->extra_info.file_filters =
-	    StringUtil::Format("ANN_INDEX_SCAN (index: %s, k: %llu, engine: %s)", found_idx.name, k, engine);
+	string extra_params;
+	if (found_idx.is_diskann) {
+		extra_params = ", type: DiskANN";
+	} else {
+		extra_params = StringUtil::Format(", type: %s", found_idx.index_type);
+		if (found_idx.nprobe > 1) {
+			extra_params += StringUtil::Format(", nprobe: %d", found_idx.nprobe);
+		}
+		if (found_idx.gpu) {
+			extra_params += ", gpu: metal";
+		}
+	}
+	target_get->extra_info.file_filters = StringUtil::Format("ANN_INDEX_SCAN (index: %s, k: %llu, engine: %s%s)",
+	                                                         found_idx.name, k, engine, extra_params);
 
 	// Remove the ORDER BY node — results from index scan are already sorted
 	op = std::move(order_by.children[0]);
@@ -472,7 +549,7 @@ static void AnnOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperat
 
 void RegisterAnnOptimizer(DatabaseInstance &db) {
 	OptimizerExtension ext;
-	ext.optimize_function = AnnOptimize;
+	ext.pre_optimize_function = AnnOptimize;
 	db.config.optimizer_extensions.push_back(std::move(ext));
 }
 

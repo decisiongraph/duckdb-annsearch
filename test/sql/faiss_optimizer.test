@@ -155,6 +155,41 @@ DROP INDEX ip_opt_idx;
 statement ok
 DROP TABLE ip_docs;
 
+# ========================================
+# EXPLAIN should show index type (issue #29)
+# ========================================
+
+statement ok
+CREATE TABLE explain_docs (id INT, embedding FLOAT[3]);
+
+statement ok
+INSERT INTO explain_docs SELECT i, [random()::FLOAT, random()::FLOAT, random()::FLOAT] FROM range(200) t(i);
+
+statement ok
+CREATE INDEX explain_idx ON explain_docs USING FAISS (embedding);
+
+query II
+EXPLAIN SELECT id, array_distance(embedding, [1.0, 0.0, 0.0]::FLOAT[3]) AS dist
+FROM explain_docs ORDER BY dist LIMIT 2;
+----
+physical_plan	<REGEX>:.*ANN_INDEX_SCAN.*type: Flat.*
+
+statement ok
+DROP INDEX explain_idx;
+
+statement ok
+DROP TABLE explain_docs;
+
+# ========================================
+# Overfetch multiplier setting (issue #25)
+# ========================================
+
+statement ok
+SET ann_overfetch_multiplier = 5;
+
+statement ok
+RESET ann_overfetch_multiplier;
+
 # Clean up
 statement ok
 DROP INDEX faiss_idx;

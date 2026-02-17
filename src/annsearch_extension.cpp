@@ -53,6 +53,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Unified listing (always available)
 	RegisterAnnsearchListFunction(loader);
 
+	// Extension settings
+	auto &config = DBConfig::GetConfig(db);
+	config.AddExtensionOption("ann_overfetch_multiplier",
+	                          "Multiplier for ANN index scan overfetch when filters are present (default 3)",
+	                          LogicalType::BIGINT, Value::BIGINT(3));
+
 	// Optimizer: ORDER BY array_distance(...) LIMIT k → ANN index scan
 	RegisterAnnOptimizer(db);
 }

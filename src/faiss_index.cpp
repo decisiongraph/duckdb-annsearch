@@ -8,6 +8,7 @@
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/exception/transaction_exception.hpp"
+#include "duckdb/common/printer.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -122,7 +123,13 @@ void FaissIndex::EnsureGpuIndex() {
 	if (!backend.IsAvailable()) {
 		return;
 	}
-	gpu_index_ = backend.CpuToGpu(faiss_index_.get());
+	try {
+		gpu_index_ = backend.CpuToGpu(faiss_index_.get());
+	} catch (std::runtime_error &e) {
+		// Unsupported index type (e.g. HNSW on Metal) — fall back to CPU with warning
+		gpu_ = false;
+		Printer::Print(StringUtil::Format("Warning: GPU disabled for index '%s': %s", name, e.what()));
+	}
 }
 
 void FaissIndex::InvalidateGpuIndex() {
