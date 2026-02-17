@@ -16,13 +16,7 @@
 #include "duckdb/storage/partial_block_manager.hpp"
 #include "duckdb/storage/table_io_manager.hpp"
 
-#include <faiss/IndexFlat.h>
-#include <faiss/IndexHNSW.h>
-#include <faiss/IndexIVFFlat.h>
-#include <faiss/MetricType.h>
-#include <faiss/impl/io.h>
-#include <faiss/index_factory.h>
-#include <faiss/index_io.h>
+#include "faiss_wrapper.hpp"
 
 namespace duckdb {
 
@@ -50,19 +44,18 @@ static std::unique_ptr<faiss::Index> MakeFaissIndex(int32_t dimension, const str
 	}
 
 	if (index_type == "HNSW" || index_type == "hnsw") {
-		return std::unique_ptr<faiss::Index>(new faiss::IndexHNSWFlat(dimension, hnsw_m, faiss_metric));
+		return make_faiss_unique<faiss::IndexHNSWFlat>(dimension, hnsw_m, faiss_metric);
 	}
 
 	if (index_type == "IVFFlat" || index_type == "ivfflat") {
 		auto quantizer = new faiss::IndexFlat(dimension, faiss_metric);
-		auto idx = std::unique_ptr<faiss::IndexIVFFlat>(
-		    new faiss::IndexIVFFlat(quantizer, dimension, ivf_nlist, faiss_metric));
+		auto idx = make_faiss_unique<faiss::IndexIVFFlat>(quantizer, dimension, ivf_nlist, faiss_metric);
 		idx->own_fields = true;
 		return idx;
 	}
 
 	// Default: Flat
-	return std::unique_ptr<faiss::Index>(new faiss::IndexFlat(dimension, faiss_metric));
+	return make_faiss_unique<faiss::IndexFlat>(dimension, faiss_metric);
 }
 
 // ========================================

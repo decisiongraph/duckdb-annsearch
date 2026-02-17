@@ -4,13 +4,7 @@
 
 #ifdef FAISS_METAL_ENABLED
 
-// FAISS headers use 'nil' as a parameter name (InvertedLists.h) which is
-// a keyword in Objective-C++. Temporarily redefine to avoid the conflict.
-#pragma push_macro("nil")
-#undef nil
-#include <faiss/IndexFlat.h>
-#include <faiss/IndexIVFFlat.h>
-#pragma pop_macro("nil")
+#include "faiss_wrapper.hpp"
 
 #include <faiss-metal/MetalIndexFlat.h>
 #include <faiss-metal/MetalIndexIVFFlat.h>

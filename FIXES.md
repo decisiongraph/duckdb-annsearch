@@ -111,3 +111,14 @@ devenv shell -- make release GEN=ninja
 ```
 
 If not using devenv, ensure `faiss`, `OpenMP`, and `faiss-metal` (sibling directory) are findable by cmake.
+
+## 2026-02-17 Build Improvements
+
+### 10. Automated faiss-metal fetching
+CMakeLists.txt now uses `FetchContent` to download `faiss-metal` from GitHub if not found locally at `../faiss-metal`.
+
+### 11. Centralized faiss wrapper
+Created `src/include/faiss_wrapper.hpp` to handle:
+- Objective-C `nil` conflict.
+- `std::make_unique` workaround (via `make_faiss_unique`).
+Refactored `src/faiss_index.cpp` and `src/gpu_backend_metal.mm` to use this wrapper.

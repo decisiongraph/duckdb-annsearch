@@ -140,19 +140,14 @@ if(FAISS_AVAILABLE AND APPLE)
             OUTPUT_VARIABLE REAL_MACOS_SDK
             OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-        # Build faiss-metal as subdirectory (sibling project)
-        set(FAISS_METAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../faiss-metal")
-        if(EXISTS "${FAISS_METAL_DIR}/CMakeLists.txt")
-            set(FAISS_METAL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-            add_subdirectory(${FAISS_METAL_DIR} faiss-metal-build)
-            # Fix include dirs for install export (source-dir paths not allowed)
-            set_target_properties(faiss_metal PROPERTIES
-                INTERFACE_INCLUDE_DIRECTORIES "$<BUILD_INTERFACE:${FAISS_METAL_DIR}/include>")
-            message(STATUS "FAISS Metal GPU: ENABLED (from ${FAISS_METAL_DIR})")
-        else()
-            message(STATUS "FAISS Metal GPU: DISABLED (faiss-metal not found at ${FAISS_METAL_DIR})")
-            set(FAISS_METAL_AVAILABLE OFF)
-        endif()
+        # Build faiss-metal from in-tree source
+        set(FAISS_METAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/faiss-metal")
+        set(FAISS_METAL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        add_subdirectory(${FAISS_METAL_DIR})
+        # Fix include dirs for install export (source-dir paths not allowed)
+        set_target_properties(faiss_metal PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "$<BUILD_INTERFACE:${FAISS_METAL_DIR}/include>")
+        message(STATUS "FAISS Metal GPU: ENABLED")
     else()
         message(STATUS "FAISS Metal GPU: DISABLED (Metal frameworks not found)")
     endif()
