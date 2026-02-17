@@ -78,6 +78,7 @@ static unique_ptr<GlobalTableFunctionState> AnnIndexScanInit(ClientContext &cont
 	}
 #ifdef FAISS_AVAILABLE
 	else {
+		indexes.Bind(context, table_info, FaissIndex::TYPE_NAME);
 		auto idx_ptr = indexes.Find(bind_data.index_name);
 		if (idx_ptr) {
 			auto &faiss_idx = idx_ptr->Cast<FaissIndex>();

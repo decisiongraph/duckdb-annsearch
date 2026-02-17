@@ -829,17 +829,17 @@ static void FaissIndexScanScan(ClientContext &context, TableFunctionInput &data,
 		auto &duck_table =
 		    catalog.GetEntry<TableCatalogEntry>(context, DEFAULT_SCHEMA, bind.table_name).Cast<DuckTableEntry>();
 		auto &storage = duck_table.GetStorage();
-		auto &indexes = storage.GetDataTableInfo()->GetIndexes();
+		auto &table_info = *storage.GetDataTableInfo();
+		auto &indexes = table_info.GetIndexes();
+
+		// Bind unbound FAISS indexes (needed after database reopen)
+		indexes.Bind(context, table_info, FaissIndex::TYPE_NAME);
 
 		FaissIndex *faiss_idx = nullptr;
-		indexes.Scan([&](Index &idx) {
-			if (idx.GetIndexName() == bind.index_name) {
-				auto &bound = idx.Cast<BoundIndex>();
-				faiss_idx = dynamic_cast<FaissIndex *>(&bound);
-				return true;
-			}
-			return false;
-		});
+		auto idx_ptr = indexes.Find(bind.index_name);
+		if (idx_ptr) {
+			faiss_idx = dynamic_cast<FaissIndex *>(idx_ptr.get());
+		}
 
 		if (!faiss_idx) {
 			throw InvalidInputException("FAISS index '%s' not found on table '%s'", bind.index_name, bind.table_name);

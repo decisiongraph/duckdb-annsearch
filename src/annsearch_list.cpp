@@ -161,6 +161,11 @@ void RegisterAnnsearchListFunction(ExtensionLoader &loader) {
 					if (idx_type == "DISKANN") {
 						indexes.Bind(context, table_info, DiskannIndex::TYPE_NAME);
 					}
+#ifdef FAISS_AVAILABLE
+					if (idx_type == "FAISS") {
+						indexes.Bind(context, table_info, FaissIndex::TYPE_NAME);
+					}
+#endif
 
 					auto idx_ptr = indexes.Find(e.name);
 					if (idx_ptr) {

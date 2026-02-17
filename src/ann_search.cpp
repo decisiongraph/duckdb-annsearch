@@ -102,36 +102,37 @@ static void AnnSearchScan(ClientContext &context, TableFunctionInput &data, Data
 		auto &duck_table =
 		    catalog.GetEntry<TableCatalogEntry>(context, DEFAULT_SCHEMA, bind.table_name).Cast<DuckTableEntry>();
 		auto &storage = duck_table.GetStorage();
-		auto &indexes = storage.GetDataTableInfo()->GetIndexes();
+		auto &table_info = *storage.GetDataTableInfo();
+		auto &indexes = table_info.GetIndexes();
+
+		// Bind unbound indexes (needed after database reopen)
+		indexes.Bind(context, table_info, DiskannIndex::TYPE_NAME);
+#ifdef FAISS_AVAILABLE
+		indexes.Bind(context, table_info, FaissIndex::TYPE_NAME);
+#endif
 
 		auto fetch_k = bind.k * bind.oversample;
 
 		bool found = false;
-		indexes.Scan([&](Index &idx) {
-			if (idx.GetIndexName() != bind.index_name) {
-				return false;
-			}
-			auto &bound = idx.Cast<BoundIndex>();
-
-			auto *diskann = dynamic_cast<DiskannIndex *>(&bound);
+		auto idx_ptr = indexes.Find(bind.index_name);
+		if (idx_ptr) {
+			auto *diskann = dynamic_cast<DiskannIndex *>(idx_ptr.get());
 			if (diskann) {
 				state.results = diskann->Search(bind.query.data(), static_cast<int32_t>(bind.query.size()), fetch_k,
 				                                bind.search_complexity);
 				found = true;
-				return true;
 			}
 
 #ifdef FAISS_AVAILABLE
-			auto *faiss = dynamic_cast<FaissIndex *>(&bound);
-			if (faiss) {
-				state.results = faiss->Search(bind.query.data(), static_cast<int32_t>(bind.query.size()), fetch_k);
-				found = true;
-				return true;
+			if (!found) {
+				auto *faiss = dynamic_cast<FaissIndex *>(idx_ptr.get());
+				if (faiss) {
+					state.results = faiss->Search(bind.query.data(), static_cast<int32_t>(bind.query.size()), fetch_k);
+					found = true;
+				}
 			}
 #endif
-
-			return false;
-		});
+		}
 
 		if (!found) {
 			throw InvalidInputException("ANN index '%s' not found on table '%s'", bind.index_name, bind.table_name);
@@ -280,34 +281,37 @@ static void AnnSearchBatchScan(ClientContext &context, TableFunctionInput &data,
 		auto &duck_table =
 		    catalog.GetEntry<TableCatalogEntry>(context, DEFAULT_SCHEMA, bind.table_name).Cast<DuckTableEntry>();
 		auto &storage = duck_table.GetStorage();
-		auto &indexes = storage.GetDataTableInfo()->GetIndexes();
+		auto &table_info = *storage.GetDataTableInfo();
+		auto &indexes = table_info.GetIndexes();
+
+		// Bind unbound indexes (needed after database reopen)
+		indexes.Bind(context, table_info, DiskannIndex::TYPE_NAME);
+#ifdef FAISS_AVAILABLE
+		indexes.Bind(context, table_info, FaissIndex::TYPE_NAME);
+#endif
+
+		auto idx_ptr = indexes.Find(bind.index_name);
 
 		for (int32_t qi = 0; qi < static_cast<int32_t>(bind.queries.size()); qi++) {
 			auto &query = bind.queries[qi];
 			vector<pair<row_t, float>> results;
 
-			indexes.Scan([&](Index &idx) {
-				if (idx.GetIndexName() != bind.index_name) {
-					return false;
-				}
-				auto &bound = idx.Cast<BoundIndex>();
-
-				auto *diskann = dynamic_cast<DiskannIndex *>(&bound);
+			if (idx_ptr) {
+				auto *diskann = dynamic_cast<DiskannIndex *>(idx_ptr.get());
 				if (diskann) {
 					results = diskann->Search(query.data(), static_cast<int32_t>(query.size()), bind.k,
 					                          bind.search_complexity);
-					return true;
 				}
 
 #ifdef FAISS_AVAILABLE
-				auto *faiss = dynamic_cast<FaissIndex *>(&bound);
-				if (faiss) {
-					results = faiss->Search(query.data(), static_cast<int32_t>(query.size()), bind.k);
-					return true;
+				if (results.empty()) {
+					auto *faiss = dynamic_cast<FaissIndex *>(idx_ptr.get());
+					if (faiss) {
+						results = faiss->Search(query.data(), static_cast<int32_t>(query.size()), bind.k);
+					}
 				}
 #endif
-				return false;
-			});
+			}
 
 			for (auto &pair : results) {
 				state.results.push_back({qi, pair.first, pair.second});

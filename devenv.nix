@@ -1,16 +1,20 @@
 { pkgs, lib, ... }:
 
+# Pin vcpkg commit to match community-extensions description.yml
+let
+  vcpkgCommit = "e5a1490e1409d175932ef6014519e9ae149ddb7c";
+in
 {
   # Only provide dependencies not available in macOS SDK.
   # Metal frameworks come from Xcode.
+  # FAISS is provided by vcpkg (matching CI pipeline) — not nix.
   packages = [
     pkgs.git
     pkgs.gh
     pkgs.gnumake
     pkgs.cmake
     pkgs.ninja
-    pkgs.faiss
-    pkgs.llvmPackages.openmp
+    pkgs.llvmPackages.openmp  # needed by vcpkg's faiss build
 
     # C/C++ tools
     pkgs.autoconf
@@ -20,6 +24,11 @@
 
     # Rust toolchain
     pkgs.rustup
+
+    # vcpkg needs curl and zip/unzip for downloading ports
+    pkgs.curl
+    pkgs.zip
+    pkgs.unzip
   ];
 
   # Do NOT enable languages.cplusplus -- it pulls in nix apple-sdk which
@@ -36,6 +45,20 @@
     unset NIX_LDFLAGS
     export CC=/usr/bin/clang
     export CXX=/usr/bin/clang++
+
+    # Bootstrap vcpkg (matching CI pipeline)
+    VCPKG_DIR="$PWD/vcpkg"
+    if [ ! -d "$VCPKG_DIR" ]; then
+      echo "Fetching vcpkg at pinned commit ${vcpkgCommit}..."
+      git init "$VCPKG_DIR"
+      git -C "$VCPKG_DIR" fetch --depth 1 https://github.com/microsoft/vcpkg.git ${vcpkgCommit}
+      git -C "$VCPKG_DIR" checkout FETCH_HEAD
+    fi
+    if [ ! -x "$VCPKG_DIR/vcpkg" ]; then
+      echo "Bootstrapping vcpkg..."
+      "$VCPKG_DIR/bootstrap-vcpkg.sh" -disableMetrics
+    fi
+    export VCPKG_TOOLCHAIN_PATH="$VCPKG_DIR/scripts/buildsystems/vcpkg.cmake"
   '';
 
   git-hooks.hooks = {

@@ -1,0 +1,163 @@
+# name: test/sql/faiss_basic.test
+# description: Test basic FAISS index functionality (Flat, HNSW, IVFFlat)
+# group: [faiss]
+
+require annsearch
+
+# ========================================
+# Flat index (default)
+# ========================================
+
+statement ok
+CREATE TABLE vectors (id INT, embedding FLOAT[3]);
+
+statement ok
+INSERT INTO vectors VALUES
+  (1, [1.0, 0.0, 0.0]),
+  (2, [0.0, 1.0, 0.0]),
+  (3, [0.0, 0.0, 1.0]);
+
+statement ok
+CREATE INDEX flat_idx ON vectors USING FAISS (embedding);
+
+# Verify index exists
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'flat_idx';
+----
+1
+
+# Verify it shows up in annsearch_list
+query III
+SELECT * FROM annsearch_list() WHERE name = 'flat_idx';
+----
+flat_idx	FAISS	vectors
+
+# Search nearest to [1,0,0] via raw index scan
+query II
+SELECT row_id, distance FROM faiss_index_scan('vectors', 'flat_idx', [1.0, 0.0, 0.0], 2) ORDER BY distance;
+----
+0	0.0
+1	2.0
+
+# Search via unified ann_search (returns full rows)
+query III
+SELECT id, embedding, _distance
+FROM ann_search('vectors', 'flat_idx', [1.0, 0.0, 0.0]::FLOAT[3], 3)
+ORDER BY _distance;
+----
+1	[1.0, 0.0, 0.0]	0.0
+2	[0.0, 1.0, 0.0]	2.0
+3	[0.0, 0.0, 1.0]	2.0
+
+# Insert and search again
+statement ok
+INSERT INTO vectors VALUES (4, [0.9, 0.1, 0.0]);
+
+query II
+SELECT v.id, s.distance
+FROM faiss_index_scan('vectors', 'flat_idx', [1.0, 0.0, 0.0], 2) s
+JOIN vectors v ON v.rowid = s.row_id
+ORDER BY s.distance;
+----
+1	0.0
+4	0.020000001
+
+# Drop index
+statement ok
+DROP INDEX flat_idx;
+
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'flat_idx';
+----
+0
+
+# ========================================
+# HNSW index
+# ========================================
+
+statement ok
+CREATE INDEX hnsw_idx ON vectors USING FAISS (embedding) WITH (type = 'HNSW', hnsw_m = 16);
+
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'hnsw_idx';
+----
+1
+
+# HNSW should find nearest neighbor
+query II
+SELECT v.id, s.distance
+FROM faiss_index_scan('vectors', 'hnsw_idx', [1.0, 0.0, 0.0], 1) s
+JOIN vectors v ON v.rowid = s.row_id;
+----
+1	0.0
+
+statement ok
+DROP INDEX hnsw_idx;
+
+# ========================================
+# Inner Product metric
+# ========================================
+
+statement ok
+CREATE INDEX ip_idx ON vectors USING FAISS (embedding) WITH (metric = 'IP');
+
+# Inner product: [1,0,0] dot [1,0,0] = 1.0 (highest similarity)
+query II
+SELECT v.id, s.distance
+FROM faiss_index_scan('vectors', 'ip_idx', [1.0, 0.0, 0.0], 1) s
+JOIN vectors v ON v.rowid = s.row_id;
+----
+1	1.0
+
+statement ok
+DROP INDEX ip_idx;
+
+# ========================================
+# Delete: tombstones exclude rows
+# ========================================
+
+statement ok
+CREATE INDEX del_idx ON vectors USING FAISS (embedding);
+
+# Before delete: id=1 is nearest
+query II
+SELECT v.id, s.distance
+FROM faiss_index_scan('vectors', 'del_idx', [1.0, 0.0, 0.0], 1) s
+JOIN vectors v ON v.rowid = s.row_id;
+----
+1	0.0
+
+# Delete the nearest vector
+statement ok
+DELETE FROM vectors WHERE id = 1;
+
+# After delete: next nearest should be returned
+query II
+SELECT v.id, s.distance
+FROM faiss_index_scan('vectors', 'del_idx', [1.0, 0.0, 0.0], 1) s
+JOIN vectors v ON v.rowid = s.row_id;
+----
+4	0.020000001
+
+statement ok
+DROP INDEX del_idx;
+
+# ========================================
+# Error: wrong dimension query
+# ========================================
+
+statement ok
+CREATE INDEX err_idx ON vectors USING FAISS (embedding);
+
+# Query with wrong dimension returns empty (dimension mismatch handled gracefully)
+query I
+SELECT count(*) FROM faiss_index_scan('vectors', 'err_idx', [1.0, 0.0], 2);
+----
+0
+
+statement ok
+DROP INDEX err_idx;
+
+# Clean up
+statement ok
+DROP TABLE vectors;

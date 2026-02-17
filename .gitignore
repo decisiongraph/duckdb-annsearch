@@ -1,5 +1,8 @@
 build/
 rust_lib/target/
+vcpkg/
+CMakeCache.txt
+CMakeFiles/
 .devenv/
 .devenv.flake.nix
 devenv.lock

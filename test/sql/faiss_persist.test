@@ -1,0 +1,105 @@
+# name: test/sql/faiss_persist.test
+# description: Test FAISS index persistence across checkpoint/restart
+# group: [faiss]
+
+require annsearch
+
+load __TEST_DIR__/faiss_persist.db
+
+# ========================================
+# Session 1: Create and populate
+# ========================================
+
+statement ok
+CREATE TABLE vectors (id INT, embedding FLOAT[3]);
+
+statement ok
+INSERT INTO vectors VALUES
+  (1, [1.0, 0.0, 0.0]),
+  (2, [0.0, 1.0, 0.0]),
+  (3, [0.0, 0.0, 1.0]);
+
+statement ok
+CREATE INDEX persist_idx ON vectors USING FAISS (embedding);
+
+# Verify search works before checkpoint
+query II
+SELECT v.id, s.distance
+FROM faiss_index_scan('vectors', 'persist_idx', [1.0, 0.0, 0.0], 1) s
+JOIN vectors v ON v.rowid = s.row_id;
+----
+1	0.0
+
+# Verify index is visible
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'persist_idx';
+----
+1
+
+statement ok
+CHECKPOINT;
+
+# ========================================
+# Session 2: Reopen and verify
+# ========================================
+
+restart
+
+# First check: is the index still in the catalog?
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'persist_idx';
+----
+1
+
+# Check via annsearch_list
+query III
+SELECT * FROM annsearch_list() WHERE name = 'persist_idx';
+----
+persist_idx	FAISS	vectors
+
+# Now search
+query II
+SELECT v.id, s.distance
+FROM faiss_index_scan('vectors', 'persist_idx', [1.0, 0.0, 0.0], 3) s
+JOIN vectors v ON v.rowid = s.row_id
+ORDER BY s.distance;
+----
+1	0.0
+2	2.0
+3	2.0
+
+# Insert after reopen
+statement ok
+INSERT INTO vectors VALUES (4, [0.5, 0.5, 0.0]);
+
+query II
+SELECT v.id, s.distance
+FROM faiss_index_scan('vectors', 'persist_idx', [1.0, 0.0, 0.0], 2) s
+JOIN vectors v ON v.rowid = s.row_id
+ORDER BY s.distance;
+----
+1	0.0
+4	0.5
+
+statement ok
+CHECKPOINT;
+
+# ========================================
+# Session 3: Verify insert persists
+# ========================================
+
+restart
+
+query I
+SELECT count(*) FROM vectors;
+----
+4
+
+query II
+SELECT v.id, s.distance
+FROM faiss_index_scan('vectors', 'persist_idx', [1.0, 0.0, 0.0], 2) s
+JOIN vectors v ON v.rowid = s.row_id
+ORDER BY s.distance;
+----
+1	0.0
+4	0.5
