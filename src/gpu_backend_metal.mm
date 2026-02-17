@@ -4,11 +4,17 @@
 
 #ifdef FAISS_METAL_ENABLED
 
+// FAISS headers use 'nil' as a parameter name (InvertedLists.h) which is
+// a keyword in Objective-C++. Temporarily redefine to avoid the conflict.
+#pragma push_macro("nil")
+#undef nil
+#include <faiss/IndexFlat.h>
+#include <faiss/IndexIVFFlat.h>
+#pragma pop_macro("nil")
+
 #include <faiss-metal/MetalIndexFlat.h>
 #include <faiss-metal/MetalIndexIVFFlat.h>
 #include <faiss-metal/StandardMetalResources.h>
-#include <faiss/IndexFlat.h>
-#include <faiss/IndexIVFFlat.h>
 
 namespace duckdb {
 
@@ -32,7 +38,7 @@ class MetalGpuBackend : public GpuBackend {
             return "Metal: not available";
         }
         auto &caps = resources_->getCapabilities();
-        return "Metal GPU (family=" + std::to_string(caps.metalFamily) + ")";
+        return "Metal GPU (" + caps.deviceName + ")";
     }
 
     std::string BackendName() const override {

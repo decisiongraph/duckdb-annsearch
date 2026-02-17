@@ -366,6 +366,82 @@ impl InMemoryIndex {
         })
     }
 
+    /// Search writing results directly into caller-provided buffers.
+    /// Returns number of results written. Avoids intermediate Vec allocation.
+    pub fn search_into(
+        &self,
+        query: &[f32],
+        k: usize,
+        search_complexity: u32,
+        out_labels: &mut [i64],
+        out_distances: &mut [f32],
+    ) -> Result<usize> {
+        if query.len() != self.dimension {
+            return Err(anyhow!(
+                "Query dimension {} doesn't match index dimension {}",
+                query.len(),
+                self.dimension
+            ));
+        }
+
+        let n = self.provider.len();
+        if n == 0 {
+            return Ok(0);
+        }
+
+        let k = k.min(n);
+
+        if n == 1 {
+            let dist = self.single_vector_distance(query);
+            if !out_labels.is_empty() && !out_distances.is_empty() {
+                out_labels[0] = 0;
+                out_distances[0] = dist;
+                return Ok(1);
+            }
+            return Ok(0);
+        }
+
+        let idx_guard = self.index.read();
+        let index = idx_guard
+            .as_ref()
+            .ok_or_else(|| anyhow!("Index not initialized"))?;
+
+        let strategy = FullPrecisionStrategy::new();
+        let ctx = DefaultContext;
+
+        let base_l = if search_complexity > 0 {
+            search_complexity as usize
+        } else {
+            self.build_complexity as usize
+        };
+        let l_search = k.max(base_l);
+        let params = SearchParams::new(k, l_search, None)
+            .map_err(|e| anyhow!("SearchParams error: {}", e))?;
+
+        SEARCH_CTX.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            scratch.ensure_capacity(k);
+            scratch.ids[..k].fill(0);
+            scratch.distances[..k].fill(0.0);
+
+            let result_count = {
+                let (id_slice, dist_slice) = scratch.split_slices(k);
+                let mut buffer = IdDistance::new(id_slice, dist_slice);
+                let stats =
+                    runtime::block_on(index.search(&strategy, &ctx, query, &params, &mut buffer))
+                        .map_err(|e| anyhow!("DiskANN search error: {}", e))?;
+                stats.result_count as usize
+            };
+
+            let cap = result_count.min(out_labels.len()).min(out_distances.len());
+            for i in 0..cap {
+                out_labels[i] = scratch.ids[i] as i64;
+                out_distances[i] = scratch.distances[i];
+            }
+            Ok(cap)
+        })
+    }
+
     /// Get adjacency lists for all vectors 0..count, each padded/truncated to max_deg.
     pub fn get_all_adjacency(&self, count: usize, max_deg: usize) -> Vec<Vec<u32>> {
         let mut result = Vec::with_capacity(count);
@@ -619,10 +695,7 @@ impl InMemoryIndex {
     fn single_vector_distance(&self, query: &[f32]) -> f32 {
         let term = self.provider.get_vector(0);
         match term {
-            Some(v) => match self.metric {
-                Metric::L2 => l2_distance(query, &v),
-                Metric::InnerProduct => -inner_product(query, &v),
-            },
+            Some(v) => crate::distance::compute_distance(self.metric, query, &v),
             None => f32::MAX,
         }
     }
@@ -648,17 +721,6 @@ impl DiskIndex {
 
         Ok(self.provider.search(query, k, l_search))
     }
-}
-
-fn l2_distance(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y) * (x - y))
-        .sum()
-}
-
-fn inner_product(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 // ========================================

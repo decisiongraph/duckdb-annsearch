@@ -1,12 +1,11 @@
 #include "diskann_index.hpp"
+#include "linked_block_storage.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_index_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/exception/transaction_exception.hpp"
 #include "duckdb/common/types/vector.hpp"
-#include "duckdb/execution/index/fixed_size_allocator.hpp"
-#include "duckdb/execution/index/index_pointer.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/operator/logical_create_index.hpp"
@@ -14,88 +13,6 @@
 #include "duckdb/storage/table_io_manager.hpp"
 
 namespace duckdb {
-
-// ========================================
-// Linked block storage (same pattern as duckdb-vss)
-// ========================================
-
-struct LinkedBlock {
-	static constexpr idx_t BLOCK_SIZE = Storage::DEFAULT_BLOCK_SIZE - sizeof(validity_t);
-	static constexpr idx_t BLOCK_DATA_SIZE = BLOCK_SIZE - sizeof(IndexPointer);
-
-	IndexPointer next_block;
-	char data[BLOCK_DATA_SIZE] = {0};
-};
-
-class LinkedBlockWriter {
-public:
-	LinkedBlockWriter(FixedSizeAllocator &allocator, IndexPointer root)
-	    : allocator_(allocator), root_(root), current_(root), pos_(0) {
-	}
-
-	void Reset() {
-		current_ = root_;
-		pos_ = 0;
-	}
-
-	idx_t Write(const uint8_t *buffer, idx_t length) {
-		idx_t written = 0;
-		while (written < length) {
-			auto block = allocator_.Get<LinkedBlock>(current_, true);
-			auto to_write = MinValue<idx_t>(length - written, LinkedBlock::BLOCK_DATA_SIZE - pos_);
-			memcpy(block->data + pos_, buffer + written, to_write);
-			written += to_write;
-			pos_ += to_write;
-			if (pos_ == LinkedBlock::BLOCK_DATA_SIZE) {
-				pos_ = 0;
-				if (block->next_block.Get() == 0) {
-					block->next_block = allocator_.New();
-				}
-				current_ = block->next_block;
-			}
-		}
-		return written;
-	}
-
-private:
-	FixedSizeAllocator &allocator_;
-	IndexPointer root_;
-	IndexPointer current_;
-	idx_t pos_;
-};
-
-class LinkedBlockReader {
-public:
-	LinkedBlockReader(FixedSizeAllocator &allocator, IndexPointer root)
-	    : allocator_(allocator), current_(root), pos_(0), exhausted_(false) {
-	}
-
-	idx_t Read(uint8_t *buffer, idx_t length) {
-		idx_t total_read = 0;
-		while (total_read < length && !exhausted_) {
-			auto block = allocator_.Get<LinkedBlock>(current_, false);
-			auto to_read = MinValue<idx_t>(length - total_read, LinkedBlock::BLOCK_DATA_SIZE - pos_);
-			memcpy(buffer + total_read, block->data + pos_, to_read);
-			total_read += to_read;
-			pos_ += to_read;
-			if (pos_ == LinkedBlock::BLOCK_DATA_SIZE) {
-				pos_ = 0;
-				if (block->next_block.Get() == 0) {
-					exhausted_ = true;
-				} else {
-					current_ = block->next_block;
-				}
-			}
-		}
-		return total_read;
-	}
-
-private:
-	FixedSizeAllocator &allocator_;
-	IndexPointer current_;
-	idx_t pos_;
-	bool exhausted_;
-};
 
 // ========================================
 // DiskannIndex: Constructor / Destructor
@@ -640,21 +557,25 @@ vector<pair<row_t, float>> DiskannIndex::Search(const float *query, int32_t dime
 		return {};
 	}
 
-	vector<int64_t> labels(request_k);
-	vector<float> distances(request_k);
-	auto n = DiskannDetachedSearch(rust_handle_, query, dimension, request_k, search_complexity, labels.data(),
-	                               distances.data());
+	// Thread-local scratch buffers — allocated once per thread, reused across queries
+	thread_local vector<int64_t> tl_labels;
+	thread_local vector<float> tl_distances;
+	tl_labels.resize(request_k);
+	tl_distances.resize(request_k);
+
+	auto n = DiskannDetachedSearch(rust_handle_, query, dimension, request_k, search_complexity, tl_labels.data(),
+	                               tl_distances.data());
 
 	vector<pair<row_t, float>> results;
 	results.reserve(k);
 
 	for (int32_t i = 0; i < n && static_cast<int32_t>(results.size()) < k; i++) {
-		auto label = static_cast<uint32_t>(labels[i]);
+		auto label = static_cast<uint32_t>(tl_labels[i]);
 		if (deleted_labels_.count(label) > 0) {
 			continue;
 		}
 		if (label < label_to_rowid_.size()) {
-			results.emplace_back(label_to_rowid_[label], distances[i]);
+			results.emplace_back(label_to_rowid_[label], tl_distances[i]);
 		}
 	}
 

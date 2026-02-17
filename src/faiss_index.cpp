@@ -2,14 +2,13 @@
 
 #include "faiss_index.hpp"
 #include "gpu_backend.hpp"
+#include "linked_block_storage.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_index_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/exception/transaction_exception.hpp"
 #include "duckdb/common/types/vector.hpp"
-#include "duckdb/execution/index/fixed_size_allocator.hpp"
-#include "duckdb/execution/index/index_pointer.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
@@ -26,88 +25,6 @@
 #include <faiss/index_io.h>
 
 namespace duckdb {
-
-// ========================================
-// Linked block storage (same as DiskANN)
-// ========================================
-
-struct FaissLinkedBlock {
-	static constexpr idx_t BLOCK_SIZE = Storage::DEFAULT_BLOCK_SIZE - sizeof(validity_t);
-	static constexpr idx_t BLOCK_DATA_SIZE = BLOCK_SIZE - sizeof(IndexPointer);
-
-	IndexPointer next_block;
-	char data[BLOCK_DATA_SIZE] = {0};
-};
-
-class FaissLinkedBlockWriter {
-public:
-	FaissLinkedBlockWriter(FixedSizeAllocator &allocator, IndexPointer root)
-	    : allocator_(allocator), root_(root), current_(root), pos_(0) {
-	}
-
-	void Reset() {
-		current_ = root_;
-		pos_ = 0;
-	}
-
-	idx_t Write(const uint8_t *buffer, idx_t length) {
-		idx_t written = 0;
-		while (written < length) {
-			auto block = allocator_.Get<FaissLinkedBlock>(current_, true);
-			auto to_write = MinValue<idx_t>(length - written, FaissLinkedBlock::BLOCK_DATA_SIZE - pos_);
-			memcpy(block->data + pos_, buffer + written, to_write);
-			written += to_write;
-			pos_ += to_write;
-			if (pos_ == FaissLinkedBlock::BLOCK_DATA_SIZE) {
-				pos_ = 0;
-				if (block->next_block.Get() == 0) {
-					block->next_block = allocator_.New();
-				}
-				current_ = block->next_block;
-			}
-		}
-		return written;
-	}
-
-private:
-	FixedSizeAllocator &allocator_;
-	IndexPointer root_;
-	IndexPointer current_;
-	idx_t pos_;
-};
-
-class FaissLinkedBlockReader {
-public:
-	FaissLinkedBlockReader(FixedSizeAllocator &allocator, IndexPointer root)
-	    : allocator_(allocator), current_(root), pos_(0), exhausted_(false) {
-	}
-
-	idx_t Read(uint8_t *buffer, idx_t length) {
-		idx_t total_read = 0;
-		while (total_read < length && !exhausted_) {
-			auto block = allocator_.Get<FaissLinkedBlock>(current_, false);
-			auto to_read = MinValue<idx_t>(length - total_read, FaissLinkedBlock::BLOCK_DATA_SIZE - pos_);
-			memcpy(buffer + total_read, block->data + pos_, to_read);
-			total_read += to_read;
-			pos_ += to_read;
-			if (pos_ == FaissLinkedBlock::BLOCK_DATA_SIZE) {
-				pos_ = 0;
-				if (block->next_block.Get() == 0) {
-					exhausted_ = true;
-				} else {
-					current_ = block->next_block;
-				}
-			}
-		}
-		return total_read;
-	}
-
-private:
-	FixedSizeAllocator &allocator_;
-	IndexPointer current_;
-	idx_t pos_;
-	bool exhausted_;
-};
 
 // ========================================
 // Helper: parse FAISS metric
@@ -133,18 +50,19 @@ static std::unique_ptr<faiss::Index> MakeFaissIndex(int32_t dimension, const str
 	}
 
 	if (index_type == "HNSW" || index_type == "hnsw") {
-		return std::make_unique<faiss::IndexHNSWFlat>(dimension, hnsw_m, faiss_metric);
+		return std::unique_ptr<faiss::Index>(new faiss::IndexHNSWFlat(dimension, hnsw_m, faiss_metric));
 	}
 
 	if (index_type == "IVFFlat" || index_type == "ivfflat") {
 		auto quantizer = new faiss::IndexFlat(dimension, faiss_metric);
-		auto idx = std::make_unique<faiss::IndexIVFFlat>(quantizer, dimension, ivf_nlist, faiss_metric);
+		auto idx = std::unique_ptr<faiss::IndexIVFFlat>(
+		    new faiss::IndexIVFFlat(quantizer, dimension, ivf_nlist, faiss_metric));
 		idx->own_fields = true;
 		return idx;
 	}
 
 	// Default: Flat
-	return std::make_unique<faiss::IndexFlat>(dimension, faiss_metric);
+	return std::unique_ptr<faiss::Index>(new faiss::IndexFlat(dimension, faiss_metric));
 }
 
 // ========================================
@@ -177,7 +95,7 @@ FaissIndex::FaissIndex(const string &name, IndexConstraintType constraint_type, 
 		} else if (kv.first == "description") {
 			description_ = kv.second.ToString();
 		} else if (kv.first == "gpu") {
-			gpu_ = kv.second.GetValue<bool>();
+			gpu_ = BooleanValue::Get(kv.second.DefaultCastAs(LogicalType::BOOLEAN));
 		}
 	}
 
@@ -191,7 +109,7 @@ FaissIndex::FaissIndex(const string &name, IndexConstraintType constraint_type, 
 
 	// Initialize block allocator
 	auto &block_manager = table_io_manager.GetIndexBlockManager();
-	block_allocator_ = make_uniq<FixedSizeAllocator>(FaissLinkedBlock::BLOCK_SIZE, block_manager);
+	block_allocator_ = make_uniq<FixedSizeAllocator>(LinkedBlock::BLOCK_SIZE, block_manager);
 
 	// If loading from storage, deserialize
 	if (info.IsValid()) {
@@ -318,7 +236,7 @@ unique_ptr<GlobalSinkState> PhysicalCreateFaissIndex::GetGlobalSinkState(ClientC
 		} else if (kv.first == "description") {
 			state->description = kv.second.ToString();
 		} else if (kv.first == "gpu") {
-			state->gpu = kv.second.GetValue<bool>();
+			state->gpu = BooleanValue::Get(kv.second.DefaultCastAs(LogicalType::BOOLEAN));
 		}
 	}
 
@@ -614,7 +532,7 @@ void FaissIndex::PersistToDisk() {
 	uint64_t num_mappings = label_to_rowid_.size();
 	uint64_t num_tombstones = deleted_labels_.size();
 
-	FaissLinkedBlockWriter writer(*block_allocator_, root_block_ptr_);
+	LinkedBlockWriter writer(*block_allocator_, root_block_ptr_);
 	writer.Reset();
 
 	// Write FAISS serialized data
@@ -665,7 +583,7 @@ void FaissIndex::LoadFromStorage(const IndexStorageInfo &info) {
 	root_block_ptr_.Set(info.root);
 	block_allocator_->Init(info.allocator_infos[0]);
 
-	FaissLinkedBlockReader reader(*block_allocator_, root_block_ptr_);
+	LinkedBlockReader reader(*block_allocator_, root_block_ptr_);
 
 	// Read FAISS serialized data
 	uint64_t faiss_len = 0;
@@ -730,8 +648,7 @@ void FaissIndex::LoadFromStorage(const IndexStorageInfo &info) {
 
 	// Deserialize FAISS index from bytes
 	faiss::VectorIOReader faiss_reader;
-	faiss_reader.data = faiss_data.data();
-	faiss_reader.size = faiss_data.size();
+	faiss_reader.data = std::move(faiss_data);
 	faiss_index_.reset(faiss::read_index(&faiss_reader));
 
 	// Upload to GPU if the index was created with gpu=true
@@ -795,15 +712,19 @@ vector<pair<row_t, float>> FaissIndex::Search(const float *query, int32_t dimens
 	EnsureGpuIndex();
 	auto *search_index = gpu_index_ ? gpu_index_.get() : faiss_index_.get();
 
-	vector<faiss::idx_t> labels(request_k);
-	vector<float> distances(request_k);
-	search_index->search(1, query, request_k, distances.data(), labels.data());
+	// Thread-local scratch buffers — allocated once per thread, reused across queries
+	thread_local vector<faiss::idx_t> tl_labels;
+	thread_local vector<float> tl_distances;
+	tl_labels.resize(request_k);
+	tl_distances.resize(request_k);
+
+	search_index->search(1, query, request_k, tl_distances.data(), tl_labels.data());
 
 	vector<pair<row_t, float>> results;
 	results.reserve(k);
 
 	for (int32_t i = 0; i < request_k && static_cast<int32_t>(results.size()) < k; i++) {
-		auto label = labels[i];
+		auto label = tl_labels[i];
 		if (label < 0) {
 			continue; // FAISS returns -1 for unfilled slots
 		}
@@ -811,7 +732,7 @@ vector<pair<row_t, float>> FaissIndex::Search(const float *query, int32_t dimens
 			continue;
 		}
 		if (label < static_cast<int64_t>(label_to_rowid_.size())) {
-			results.emplace_back(label_to_rowid_[label], distances[i]);
+			results.emplace_back(label_to_rowid_[label], tl_distances[i]);
 		}
 	}
 

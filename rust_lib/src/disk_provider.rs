@@ -282,22 +282,8 @@ impl DiskProvider {
     }
 
     fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32 {
-        match self.metric {
-            Metric::L2 => l2_distance(a, b),
-            Metric::InnerProduct => -inner_product(a, b),
-        }
+        crate::distance::compute_distance(self.metric, a, b)
     }
-}
-
-fn l2_distance(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y) * (x - y))
-        .sum()
-}
-
-fn inner_product(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 /// Wrapper for f32 that implements Ord (for BinaryHeap).

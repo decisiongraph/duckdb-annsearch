@@ -110,6 +110,9 @@ option(ENABLE_FAISS "Build with FAISS support" ON)
 set(FAISS_AVAILABLE OFF)
 
 if(ENABLE_FAISS)
+    # OpenMP must be found before faiss so OpenMP::OpenMP_CXX target exists
+    # when cmake resolves faiss's interface link libraries.
+    find_package(OpenMP QUIET)
     find_package(faiss QUIET)
     if(faiss_FOUND)
         set(FAISS_AVAILABLE ON)
@@ -140,7 +143,11 @@ if(FAISS_AVAILABLE AND APPLE)
         # Build faiss-metal as subdirectory (sibling project)
         set(FAISS_METAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../faiss-metal")
         if(EXISTS "${FAISS_METAL_DIR}/CMakeLists.txt")
+            set(FAISS_METAL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
             add_subdirectory(${FAISS_METAL_DIR} faiss-metal-build)
+            # Fix include dirs for install export (source-dir paths not allowed)
+            set_target_properties(faiss_metal PROPERTIES
+                INTERFACE_INCLUDE_DIRECTORIES "$<BUILD_INTERFACE:${FAISS_METAL_DIR}/include>")
             message(STATUS "FAISS Metal GPU: ENABLED (from ${FAISS_METAL_DIR})")
         else()
             message(STATUS "FAISS Metal GPU: DISABLED (faiss-metal not found at ${FAISS_METAL_DIR})")
@@ -231,6 +238,12 @@ if(FAISS_AVAILABLE)
 
     target_compile_definitions(${EXTENSION_NAME} PRIVATE FAISS_AVAILABLE=1)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE FAISS_AVAILABLE=1)
+
+    # FAISS headers include omp.h — propagate OpenMP include directory
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(${EXTENSION_NAME} OpenMP::OpenMP_CXX)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenMP::OpenMP_CXX)
+    endif()
 endif()
 
 # Link Metal GPU backend
@@ -252,8 +265,12 @@ if(FAISS_METAL_AVAILABLE)
     endif()
 endif()
 
+set(_INSTALL_TARGETS ${EXTENSION_NAME})
+if(FAISS_METAL_AVAILABLE)
+    list(APPEND _INSTALL_TARGETS faiss_metal)
+endif()
 install(
-    TARGETS ${EXTENSION_NAME}
+    TARGETS ${_INSTALL_TARGETS}
     EXPORT "${DUCKDB_EXPORT_SET}"
     LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
     ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")

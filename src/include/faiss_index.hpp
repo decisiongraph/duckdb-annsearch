@@ -9,6 +9,7 @@
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 
 #include <faiss/Index.h>
 
