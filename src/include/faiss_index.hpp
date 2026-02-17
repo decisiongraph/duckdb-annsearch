@@ -76,6 +76,10 @@ private:
 	// FAISS index
 	std::unique_ptr<faiss::Index> faiss_index_;
 
+	// GPU acceleration helpers
+	void EnsureGpuIndex();
+	void InvalidateGpuIndex();
+
 	// Index parameters
 	int32_t dimension_ = 0;
 	string metric_ = "L2";
@@ -85,6 +89,10 @@ private:
 	int32_t nprobe_ = 1;
 	int64_t train_sample_ = 0; // 0 = use all vectors for training
 	string description_;
+	bool gpu_ = false;
+
+	// GPU-resident copy of faiss_index_ (for search acceleration)
+	std::unique_ptr<faiss::Index> gpu_index_;
 
 	// Row ID mapping: internal label (0,1,2,...) <-> DuckDB row_t
 	vector<row_t> label_to_rowid_;

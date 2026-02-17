@@ -1,6 +1,7 @@
 #ifdef FAISS_AVAILABLE
 
 #include "faiss_index.hpp"
+#include "gpu_backend.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_index_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
@@ -175,6 +176,8 @@ FaissIndex::FaissIndex(const string &name, IndexConstraintType constraint_type, 
 			train_sample_ = kv.second.GetValue<int64_t>();
 		} else if (kv.first == "description") {
 			description_ = kv.second.ToString();
+		} else if (kv.first == "gpu") {
+			gpu_ = kv.second.GetValue<bool>();
 		}
 	}
 
@@ -197,6 +200,22 @@ FaissIndex::FaissIndex(const string &name, IndexConstraintType constraint_type, 
 }
 
 FaissIndex::~FaissIndex() {
+	gpu_index_.reset();
+}
+
+void FaissIndex::EnsureGpuIndex() {
+	if (!gpu_ || !faiss_index_ || gpu_index_) {
+		return;
+	}
+	auto &backend = GetGpuBackend();
+	if (!backend.IsAvailable()) {
+		return;
+	}
+	gpu_index_ = backend.CpuToGpu(faiss_index_.get());
+}
+
+void FaissIndex::InvalidateGpuIndex() {
+	gpu_index_.reset();
 }
 
 // ========================================
@@ -272,6 +291,7 @@ public:
 	int32_t nprobe = 1;
 	int64_t train_sample = 0;
 	string description;
+	bool gpu = false;
 };
 
 class CreateFaissLocalSinkState : public LocalSinkState {};
@@ -297,6 +317,8 @@ unique_ptr<GlobalSinkState> PhysicalCreateFaissIndex::GetGlobalSinkState(ClientC
 			state->train_sample = kv.second.GetValue<int64_t>();
 		} else if (kv.first == "description") {
 			state->description = kv.second.ToString();
+		} else if (kv.first == "gpu") {
+			state->gpu = kv.second.GetValue<bool>();
 		}
 	}
 
@@ -415,6 +437,9 @@ SinkFinalizeType PhysicalCreateFaissIndex::Finalize(Pipeline &pipeline, Event &e
 	if (!state.description.empty()) {
 		options["description"] = Value(state.description);
 	}
+	if (state.gpu) {
+		options["gpu"] = Value::BOOLEAN(true);
+	}
 
 	auto index = make_uniq<FaissIndex>(info->index_name, info->constraint_type, storage_ids,
 	                                   TableIOManager::Get(storage), unbound_expressions, storage.db, options);
@@ -429,9 +454,13 @@ SinkFinalizeType PhysicalCreateFaissIndex::Finalize(Pipeline &pipeline, Event &e
 	index->nprobe_ = state.nprobe;
 	index->train_sample_ = state.train_sample;
 	index->description_ = state.description;
+	index->gpu_ = state.gpu;
 	index->label_to_rowid_ = std::move(label_to_rowid);
 	index->rowid_to_label_ = std::move(rowid_to_label);
 	index->is_dirty_ = true;
+
+	// Upload to GPU if requested
+	index->EnsureGpuIndex();
 
 	BoundIndex &bi = *index;
 	bi.Vacuum();
@@ -518,6 +547,7 @@ ErrorData FaissIndex::Append(IndexLock &lock, DataChunk &entries, Vector &row_id
 		rowid_to_label_[row_id] = label;
 	}
 
+	InvalidateGpuIndex();
 	is_dirty_ = true;
 	return ErrorData {};
 }
@@ -551,6 +581,7 @@ void FaissIndex::Delete(IndexLock &lock, DataChunk &entries, Vector &row_identif
 }
 
 void FaissIndex::CommitDrop(IndexLock &lock) {
+	gpu_index_.reset();
 	faiss_index_.reset();
 	label_to_rowid_.clear();
 	rowid_to_label_.clear();
@@ -620,6 +651,8 @@ void FaissIndex::PersistToDisk() {
 	if (desc_len > 0) {
 		writer.Write(reinterpret_cast<const uint8_t *>(description_.data()), desc_len);
 	}
+	uint8_t gpu_byte = gpu_ ? 1 : 0;
+	writer.Write(&gpu_byte, sizeof(uint8_t));
 
 	is_dirty_ = false;
 }
@@ -684,6 +717,9 @@ void FaissIndex::LoadFromStorage(const IndexStorageInfo &info) {
 		reader.Read(reinterpret_cast<uint8_t *>(desc_buf.data()), desc_len);
 		description_.assign(desc_buf.data(), desc_len);
 	}
+	uint8_t gpu_byte = 0;
+	reader.Read(&gpu_byte, sizeof(uint8_t));
+	gpu_ = (gpu_byte != 0);
 
 	// Rebuild rowid_to_label_ from label_to_rowid_
 	for (size_t i = 0; i < label_to_rowid_.size(); i++) {
@@ -697,6 +733,9 @@ void FaissIndex::LoadFromStorage(const IndexStorageInfo &info) {
 	faiss_reader.data = faiss_data.data();
 	faiss_reader.size = faiss_data.size();
 	faiss_index_.reset(faiss::read_index(&faiss_reader));
+
+	// Upload to GPU if the index was created with gpu=true
+	EnsureGpuIndex();
 
 	is_dirty_ = false;
 }
@@ -752,9 +791,13 @@ vector<pair<row_t, float>> FaissIndex::Search(const float *query, int32_t dimens
 		}
 	}
 
+	// Use GPU index for search if available
+	EnsureGpuIndex();
+	auto *search_index = gpu_index_ ? gpu_index_.get() : faiss_index_.get();
+
 	vector<faiss::idx_t> labels(request_k);
 	vector<float> distances(request_k);
-	faiss_index_->search(1, query, request_k, distances.data(), labels.data());
+	search_index->search(1, query, request_k, distances.data(), labels.data());
 
 	vector<pair<row_t, float>> results;
 	results.reserve(k);
@@ -786,6 +829,10 @@ idx_t FaissIndex::GetInMemorySize(IndexLock &state) {
 	if (faiss_index_) {
 		// Estimate: vectors + overhead
 		size += faiss_index_->ntotal * dimension_ * sizeof(float);
+	}
+	if (gpu_index_) {
+		// GPU copy uses roughly the same amount of memory
+		size += faiss_index_ ? faiss_index_->ntotal * dimension_ * sizeof(float) : 0;
 	}
 	return size;
 }
@@ -889,9 +936,9 @@ static void FaissIndexScanScan(ClientContext &context, TableFunctionInput &data,
 
 	idx_t count = 0;
 	while (state.offset < state.results.size() && count < STANDARD_VECTOR_SIZE) {
-		auto &[row_id, distance] = state.results[state.offset];
-		output.data[0].SetValue(count, Value::BIGINT(row_id));
-		output.data[1].SetValue(count, Value::FLOAT(distance));
+		auto &result = state.results[state.offset];
+		output.data[0].SetValue(count, Value::BIGINT(result.first));
+		output.data[1].SetValue(count, Value::FLOAT(result.second));
 		count++;
 		state.offset++;
 	}
