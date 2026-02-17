@@ -757,6 +757,64 @@ bool FaissIndex::MergeIndexes(IndexLock &state, BoundIndex &other_index) {
 }
 
 void FaissIndex::Vacuum(IndexLock &state) {
+	if (deleted_labels_.empty() || !faiss_index_) {
+		return;
+	}
+
+	auto old_ntotal = faiss_index_->ntotal;
+	if (old_ntotal == 0) {
+		deleted_labels_.clear();
+		return;
+	}
+
+	// Extract all vectors from old index
+	vector<float> all_vectors(old_ntotal * dimension_);
+	faiss_index_->reconstruct_n(0, old_ntotal, all_vectors.data());
+
+	// Build lists of surviving vectors
+	vector<float> kept_vectors;
+	vector<row_t> kept_rowids;
+	kept_vectors.reserve((old_ntotal - deleted_labels_.size()) * dimension_);
+	kept_rowids.reserve(old_ntotal - deleted_labels_.size());
+
+	for (int64_t i = 0; i < old_ntotal; i++) {
+		if (deleted_labels_.count(i) > 0) {
+			continue;
+		}
+		kept_vectors.insert(kept_vectors.end(), all_vectors.data() + i * dimension_,
+		                    all_vectors.data() + (i + 1) * dimension_);
+		if (i < (int64_t)label_to_rowid_.size()) {
+			kept_rowids.push_back(label_to_rowid_[i]);
+		}
+	}
+
+	// Create fresh index with same parameters
+	auto new_index = MakeFaissIndex(dimension_, metric_, index_type_, description_, hnsw_m_, ivf_nlist_);
+
+	// Train if needed (IVFFlat)
+	if (!kept_vectors.empty() && !new_index->is_trained) {
+		new_index->train((faiss::idx_t)kept_rowids.size(), kept_vectors.data());
+	}
+
+	// Add kept vectors
+	if (!kept_vectors.empty()) {
+		new_index->add((faiss::idx_t)kept_rowids.size(), kept_vectors.data());
+	}
+
+	// Rebuild mappings
+	label_to_rowid_.clear();
+	label_to_rowid_.resize(kept_rowids.size());
+	rowid_to_label_.clear();
+	for (size_t i = 0; i < kept_rowids.size(); i++) {
+		label_to_rowid_[i] = kept_rowids[i];
+		rowid_to_label_[kept_rowids[i]] = (int64_t)i;
+	}
+
+	// Swap in new index
+	faiss_index_ = std::move(new_index);
+	deleted_labels_.clear();
+	InvalidateGpuIndex();
+	is_dirty_ = true;
 }
 
 string FaissIndex::VerifyAndToString(IndexLock &state, const bool only_verify) {

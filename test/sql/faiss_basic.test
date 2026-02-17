@@ -143,6 +143,76 @@ statement ok
 DROP INDEX del_idx;
 
 # ========================================
+# Vacuum: compacts deleted vectors
+# ========================================
+
+statement ok
+CREATE TABLE vac_vectors (id INT, embedding FLOAT[3]);
+
+statement ok
+INSERT INTO vac_vectors VALUES
+  (1, [1.0, 0.0, 0.0]),
+  (2, [0.0, 1.0, 0.0]),
+  (3, [0.0, 0.0, 1.0]),
+  (4, [0.9, 0.1, 0.0]),
+  (5, [0.0, 0.9, 0.1]);
+
+statement ok
+CREATE INDEX vac_idx ON vac_vectors USING FAISS (embedding);
+
+# Verify 5 vectors indexed
+query I
+SELECT num_vectors FROM annsearch_index_info() WHERE name = 'vac_idx';
+----
+5
+
+# Delete two vectors
+statement ok
+DELETE FROM vac_vectors WHERE id IN (2, 3);
+
+# Search still works after delete (tombstones)
+query II
+SELECT v.id, s.distance
+FROM faiss_index_scan('vac_vectors', 'vac_idx', [1.0, 0.0, 0.0], 2) s
+JOIN vac_vectors v ON v.rowid = s.row_id
+ORDER BY s.distance;
+----
+1	0.0
+4	0.020000001
+
+# Run VACUUM to compact
+statement ok
+VACUUM vac_vectors;
+
+# After vacuum: vector count should drop to 3
+query I
+SELECT num_vectors FROM annsearch_index_info() WHERE name = 'vac_idx';
+----
+3
+
+# Search still returns correct results after vacuum
+query II
+SELECT v.id, s.distance
+FROM faiss_index_scan('vac_vectors', 'vac_idx', [1.0, 0.0, 0.0], 2) s
+JOIN vac_vectors v ON v.rowid = s.row_id
+ORDER BY s.distance;
+----
+1	0.0
+4	0.020000001
+
+# Deleted count should be 0 after vacuum
+query I
+SELECT num_deleted FROM annsearch_index_info() WHERE name = 'vac_idx';
+----
+0
+
+statement ok
+DROP INDEX vac_idx;
+
+statement ok
+DROP TABLE vac_vectors;
+
+# ========================================
 # Error: wrong dimension query
 # ========================================
 
