@@ -2,7 +2,7 @@
 # description: Test ANN optimizer rewrite with FAISS indexes
 # group: [faiss]
 
-require annsearch
+require ann
 
 statement ok
 CREATE TABLE docs (id INT, embedding FLOAT[3]);

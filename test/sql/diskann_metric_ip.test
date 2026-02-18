@@ -2,7 +2,7 @@
 # description: Test DiskANN with inner product metric
 # group: [diskann]
 
-require annsearch
+require ann
 
 statement ok
 CREATE TABLE vecs (id INT, embedding FLOAT[3]);

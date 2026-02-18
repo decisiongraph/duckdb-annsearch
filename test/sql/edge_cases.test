@@ -1,8 +1,8 @@
 # name: test/sql/edge_cases.test
 # description: Edge cases and error handling for DISKANN and FAISS indexes
-# group: [annsearch]
+# group: [ann]
 
-require annsearch
+require ann
 
 # ========================================
 # Single-dimension vectors: FLOAT[1]
@@ -211,7 +211,7 @@ CREATE INDEX multi_faiss ON multi USING FAISS (embedding);
 
 # Both should be visible
 query I
-SELECT count(*) FROM annsearch_list();
+SELECT count(*) FROM ann_list();
 ----
 2
 
@@ -301,6 +301,6 @@ DROP TABLE drop_test;
 
 # No ANN indexes should remain
 query I
-SELECT count(*) FROM annsearch_list();
+SELECT count(*) FROM ann_list();
 ----
 0

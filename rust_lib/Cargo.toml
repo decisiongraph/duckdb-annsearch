@@ -13,8 +13,8 @@ lto = "thin"
 codegen-units = 1
 
 [dependencies]
-# DiskANN
-diskann = "0.45"
+# DiskANN (local patch: clamp insert_idx in queue.rs to fix panic)
+diskann = { path = "diskann-patch" }
 diskann-vector = "0.45"
 
 # Async runtime (diskann is async-native)

@@ -13,3 +13,14 @@ cmake-build-debug
 testext
 test/python/__pycache__/
 .Rhistory
+
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml

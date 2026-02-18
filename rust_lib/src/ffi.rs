@@ -382,6 +382,93 @@ pub unsafe extern "C" fn diskann_streaming_build_buf(
 }
 
 // ========================================
+// Batch search (multi-query, GPU-accelerated for DiskIndex)
+// ========================================
+
+/// Multi-query batch search via global registry.
+/// query_matrix: nq * dimension contiguous floats (row-major).
+/// out_labels: nq * k int64s (row-major).
+/// out_distances: nq * k floats (row-major).
+/// out_counts: nq int32s — actual result count per query.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn diskann_batch_search_buf(
+    name: *const c_char,
+    query_matrix: *const f32,
+    nq: i32,
+    dimension: i32,
+    k: i32,
+    search_complexity: i32,
+    out_labels: *mut i64,
+    out_distances: *mut f32,
+    out_counts: *mut i32,
+    err_buf: *mut c_char,
+    err_buf_len: i32,
+) -> i32 {
+    let name = match cstr_to_str(name, "name", err_buf, err_buf_len) {
+        Some(s) => s,
+        None => return -1,
+    };
+
+    if nq <= 0 || dimension <= 0 || k <= 0 {
+        write_err(err_buf, err_buf_len, "Invalid nq/dimension/k");
+        return -1;
+    }
+    if query_matrix.is_null() || out_labels.is_null() || out_distances.is_null() || out_counts.is_null() {
+        write_err(err_buf, err_buf_len, "Null pointer");
+        return -1;
+    }
+
+    let idx = match index_manager::get_index(name) {
+        Ok(idx) => idx,
+        Err(e) => {
+            write_err(err_buf, err_buf_len, &e.to_string());
+            return -1;
+        }
+    };
+
+    let dim = dimension as usize;
+    if dim != idx.dimension() {
+        write_err(
+            err_buf,
+            err_buf_len,
+            &format!("Dimension mismatch: query {} vs index {}", dim, idx.dimension()),
+        );
+        return -1;
+    }
+
+    let nq = nq as usize;
+    let k = k as usize;
+
+    // Build query slices from flat matrix
+    let flat = std::slice::from_raw_parts(query_matrix, nq * dim);
+    let queries: Vec<&[f32]> = (0..nq).map(|i| &flat[i * dim..(i + 1) * dim]).collect();
+
+    match idx.search_batch(&queries, k, search_complexity as u32) {
+        Ok(results) => {
+            for (qi, qresults) in results.iter().enumerate() {
+                let n = qresults.len().min(k);
+                *out_counts.add(qi) = n as i32;
+                for i in 0..n {
+                    *out_labels.add(qi * k + i) = qresults[i].0 as i64;
+                    *out_distances.add(qi * k + i) = qresults[i].1;
+                }
+                // Fill remaining slots with sentinel values
+                for i in n..k {
+                    *out_labels.add(qi * k + i) = -1;
+                    *out_distances.add(qi * k + i) = f32::MAX;
+                }
+            }
+            0
+        }
+        Err(e) => {
+            write_err(err_buf, err_buf_len, &e.to_string());
+            -1
+        }
+    }
+}
+
+// ========================================
 // repr(C) struct-based list/info functions
 // ========================================
 
@@ -603,6 +690,79 @@ pub unsafe extern "C" fn diskann_detached_search(
     match index.search_into(query, k as usize, search_complexity as u32,
                             out_labels_slice, out_distances_slice) {
         Ok(n) => n as i32,
+        Err(e) => {
+            write_err(err_buf, err_buf_len, &e.to_string());
+            -1
+        }
+    }
+}
+
+/// Multi-query batch search on a detached index.
+/// query_matrix: nq * dimension contiguous floats (row-major).
+/// out_labels: nq * k int64s (row-major).
+/// out_distances: nq * k floats (row-major).
+/// out_counts: nq int32s — actual result count per query.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn diskann_detached_search_batch(
+    handle: DiskannHandle,
+    query_matrix: *const f32,
+    nq: i32,
+    dimension: i32,
+    k: i32,
+    search_complexity: i32,
+    out_labels: *mut i64,
+    out_distances: *mut f32,
+    out_counts: *mut i32,
+    err_buf: *mut c_char,
+    err_buf_len: i32,
+) -> i32 {
+    if handle.is_null() {
+        write_err(err_buf, err_buf_len, "Null handle");
+        return -1;
+    }
+    if nq <= 0 || dimension <= 0 || k <= 0 {
+        write_err(err_buf, err_buf_len, "Invalid nq/dimension/k");
+        return -1;
+    }
+    if query_matrix.is_null() || out_labels.is_null() || out_distances.is_null() || out_counts.is_null() {
+        write_err(err_buf, err_buf_len, "Null pointer");
+        return -1;
+    }
+
+    let index = &*handle;
+    let dim = dimension as usize;
+    let nq = nq as usize;
+    let k = k as usize;
+
+    if dim != index.dimension {
+        write_err(
+            err_buf,
+            err_buf_len,
+            &format!("Dimension mismatch: query {} vs index {}", dim, index.dimension),
+        );
+        return -1;
+    }
+
+    let flat = std::slice::from_raw_parts(query_matrix, nq * dim);
+    let queries: Vec<&[f32]> = (0..nq).map(|i| &flat[i * dim..(i + 1) * dim]).collect();
+
+    match index.search_batch(&queries, k, search_complexity as u32) {
+        Ok(results) => {
+            for (qi, qresults) in results.iter().enumerate() {
+                let n = qresults.len().min(k);
+                *out_counts.add(qi) = n as i32;
+                for i in 0..n {
+                    *out_labels.add(qi * k + i) = qresults[i].0 as i64;
+                    *out_distances.add(qi * k + i) = qresults[i].1;
+                }
+                for i in n..k {
+                    *out_labels.add(qi * k + i) = -1;
+                    *out_distances.add(qi * k + i) = f32::MAX;
+                }
+            }
+            0
+        }
         Err(e) => {
             write_err(err_buf, err_buf_len, &e.to_string());
             -1

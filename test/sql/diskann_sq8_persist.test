@@ -2,7 +2,7 @@
 # description: Test SQ8 quantized DiskANN index persistence
 # group: [diskann]
 
-require annsearch
+require ann
 
 load __TEST_DIR__/diskann_sq8_persist.db
 
@@ -25,7 +25,7 @@ CREATE INDEX sq8_idx ON vectors USING DISKANN (embedding) WITH (quantization = '
 
 # Verify quantized flag
 query I
-SELECT quantized FROM annsearch_index_info() WHERE name = 'sq8_idx';
+SELECT quantized FROM ann_index_info() WHERE name = 'sq8_idx';
 ----
 true
 
@@ -54,7 +54,7 @@ SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'sq8_idx';
 
 # Still quantized after restore
 query I
-SELECT quantized FROM annsearch_index_info() WHERE name = 'sq8_idx';
+SELECT quantized FROM ann_index_info() WHERE name = 'sq8_idx';
 ----
 true
 

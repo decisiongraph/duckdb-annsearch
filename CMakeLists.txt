@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.5)
 
-set(TARGET_NAME annsearch)
+set(TARGET_NAME ann)
 
 # ========================================
 # 1. Rust DiskANN library (staticlib via cargo)
@@ -80,6 +80,8 @@ if(ENABLE_RUST_DISKANN)
                 ${RUST_LIB_DIR}/src/runtime.rs
                 ${RUST_LIB_DIR}/src/file_format.rs
                 ${RUST_LIB_DIR}/src/disk_provider.rs
+                ${RUST_LIB_DIR}/src/distance.rs
+                ${RUST_LIB_DIR}/src/metal_ffi.rs
                 ${RUST_LIB_DIR}/src/streaming_build.rs
         )
 
@@ -171,13 +173,13 @@ include_directories(src/include)
 
 # Core sources (always compiled)
 set(EXTENSION_SOURCES
-    src/annsearch_extension.cpp
+    src/ann_extension.cpp
     src/ann_search.cpp
     src/ann_optimizer.cpp
     src/diskann_functions.cpp
     src/diskann_index.cpp
     src/rust_ffi.cpp
-    src/annsearch_list.cpp
+    src/ann_list.cpp
 )
 
 # FAISS sources (conditionally compiled via #ifdef FAISS_AVAILABLE in each file)
@@ -186,11 +188,12 @@ list(APPEND EXTENSION_SOURCES
     src/faiss_fn_gpu.cpp
     src/faiss_vector_utils.cpp
     src/gpu_backend_cpu.cpp
+    src/metal_diskann_stub.cpp
 )
 
 # Metal GPU backend (Objective-C++)
 if(FAISS_METAL_AVAILABLE)
-    list(APPEND EXTENSION_SOURCES src/gpu_backend_metal.mm)
+    list(APPEND EXTENSION_SOURCES src/gpu_backend_metal.mm src/metal_diskann_bridge.mm)
 endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
@@ -248,8 +251,10 @@ if(FAISS_METAL_AVAILABLE)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} faiss_metal
         "-framework Metal" "-framework MetalPerformanceShaders" "-framework Foundation")
 
-    target_compile_definitions(${EXTENSION_NAME} PRIVATE FAISS_METAL_ENABLED=1)
-    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE FAISS_METAL_ENABLED=1)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE FAISS_METAL_ENABLED=1
+        FAISS_METAL_METALLIB_PATH="${CMAKE_BINARY_DIR}/faiss_metal.metallib")
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE FAISS_METAL_ENABLED=1
+        FAISS_METAL_METALLIB_PATH="${CMAKE_BINARY_DIR}/faiss_metal.metallib")
 
     # Prioritize real SDK framework headers over nix apple-sdk
     if(REAL_MACOS_SDK)

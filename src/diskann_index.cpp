@@ -577,6 +577,48 @@ vector<pair<row_t, float>> DiskannIndex::Search(const float *query, int32_t dime
 	return results;
 }
 
+vector<vector<pair<row_t, float>>> DiskannIndex::SearchBatch(const vector<vector<float>> &queries, int32_t k,
+                                                             int32_t search_complexity) {
+	auto nq = static_cast<int32_t>(queries.size());
+	vector<vector<pair<row_t, float>>> all_results(nq);
+
+	if (!rust_handle_ || nq == 0) {
+		return all_results;
+	}
+
+	// Flatten queries into contiguous buffer
+	vector<float> flat_queries;
+	flat_queries.reserve(static_cast<size_t>(nq) * dimension_);
+	for (auto &q : queries) {
+		flat_queries.insert(flat_queries.end(), q.begin(), q.end());
+	}
+
+	// Allocate output buffers
+	auto total = static_cast<size_t>(nq) * k;
+	vector<int64_t> flat_labels(total, -1);
+	vector<float> flat_distances(total, std::numeric_limits<float>::max());
+	vector<int32_t> counts(nq, 0);
+
+	// Single batch FFI call — GPU-accelerated lock-step BFS
+	DiskannDetachedSearchBatch(rust_handle_, flat_queries.data(), nq, dimension_, k, search_complexity,
+	                           flat_labels.data(), flat_distances.data(), counts.data());
+
+	// Reconstruct per-query results with row_id mapping
+	for (int32_t qi = 0; qi < nq; qi++) {
+		auto n = counts[qi];
+		auto base = static_cast<size_t>(qi) * k;
+		all_results[qi].reserve(n);
+		for (int32_t i = 0; i < n; i++) {
+			auto label = static_cast<uint32_t>(flat_labels[base + i]);
+			if (label < label_to_rowid_.size()) {
+				all_results[qi].emplace_back(label_to_rowid_[label], flat_distances[base + i]);
+			}
+		}
+	}
+
+	return all_results;
+}
+
 // ========================================
 // Utility methods
 // ========================================

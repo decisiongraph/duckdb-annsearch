@@ -2,7 +2,7 @@
 # description: Test SQ8 scalar quantization for DiskANN indexes
 # group: [diskann]
 
-require annsearch
+require ann
 
 # Create table with vectors
 statement ok
@@ -33,7 +33,7 @@ SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'sq8_idx';
 
 # Verify quantization reported in diagnostics
 query I
-SELECT quantized FROM annsearch_index_info() WHERE name = 'sq8_idx';
+SELECT quantized FROM ann_index_info() WHERE name = 'sq8_idx';
 ----
 true
 
@@ -73,7 +73,7 @@ CREATE INDEX noquant_idx ON qvectors USING DISKANN (embedding);
 
 # Non-quantized should not be reported as quantized
 query I
-SELECT quantized FROM annsearch_index_info() WHERE name = 'noquant_idx';
+SELECT quantized FROM ann_index_info() WHERE name = 'noquant_idx';
 ----
 false
 

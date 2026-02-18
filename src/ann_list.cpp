@@ -1,4 +1,4 @@
-#include "annsearch_extension.hpp"
+#include "ann_extension.hpp"
 #include "diskann_index.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
@@ -14,26 +14,26 @@
 namespace duckdb {
 
 // ========================================
-// annsearch_list()
+// ann_list()
 // Lists all ANN indexes (DISKANN, FAISS) from the DuckDB catalog.
 // ========================================
 
-struct AnnsearchListEntry {
+struct AnnListEntry {
 	string name;
 	string engine;
 	string table_name;
 };
 
-struct AnnsearchListState : public GlobalTableFunctionState {
-	vector<AnnsearchListEntry> entries;
+struct AnnListState : public GlobalTableFunctionState {
+	vector<AnnListEntry> entries;
 	idx_t position = 0;
 	idx_t MaxThreads() const override {
 		return 1;
 	}
 };
 
-static unique_ptr<FunctionData> AnnsearchListBind(ClientContext &context, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+static unique_ptr<FunctionData> AnnListBind(ClientContext &context, TableFunctionBindInput &input,
+                                            vector<LogicalType> &return_types, vector<string> &names) {
 	return_types.push_back(LogicalType::VARCHAR);
 	return_types.push_back(LogicalType::VARCHAR);
 	return_types.push_back(LogicalType::VARCHAR);
@@ -43,8 +43,8 @@ static unique_ptr<FunctionData> AnnsearchListBind(ClientContext &context, TableF
 	return make_uniq<TableFunctionData>();
 }
 
-static unique_ptr<GlobalTableFunctionState> AnnsearchListInit(ClientContext &context, TableFunctionInitInput &input) {
-	auto state = make_uniq<AnnsearchListState>();
+static unique_ptr<GlobalTableFunctionState> AnnListInit(ClientContext &context, TableFunctionInitInput &input) {
+	auto state = make_uniq<AnnListState>();
 
 	auto schemas = Catalog::GetAllSchemas(context);
 	for (auto &schema : schemas) {
@@ -52,7 +52,7 @@ static unique_ptr<GlobalTableFunctionState> AnnsearchListInit(ClientContext &con
 			auto &index_entry = entry.Cast<IndexCatalogEntry>();
 			auto &idx_type = index_entry.index_type;
 			if (idx_type == "DISKANN" || idx_type == "FAISS") {
-				AnnsearchListEntry e;
+				AnnListEntry e;
 				e.name = index_entry.name;
 				e.engine = idx_type;
 				e.table_name = index_entry.GetTableName();
@@ -64,8 +64,8 @@ static unique_ptr<GlobalTableFunctionState> AnnsearchListInit(ClientContext &con
 	return std::move(state);
 }
 
-static void AnnsearchListScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &state = data.global_state->Cast<AnnsearchListState>();
+static void AnnListScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<AnnListState>();
 
 	if (state.position >= state.entries.size()) {
 		output.SetCardinality(0);
@@ -85,12 +85,12 @@ static void AnnsearchListScan(ClientContext &context, TableFunctionInput &data, 
 	output.SetCardinality(chunk_size);
 }
 
-void RegisterAnnsearchListFunction(ExtensionLoader &loader) {
-	TableFunction func("annsearch_list", {}, AnnsearchListScan, AnnsearchListBind, AnnsearchListInit);
+void RegisterAnnListFunction(ExtensionLoader &loader) {
+	TableFunction func("ann_list", {}, AnnListScan, AnnListBind, AnnListInit);
 	loader.RegisterFunction(func);
 
 	// ========================================
-	// annsearch_index_info()
+	// ann_index_info()
 	// Detailed index diagnostics with stats
 	// ========================================
 
@@ -217,7 +217,7 @@ void RegisterAnnsearchListFunction(ExtensionLoader &loader) {
 		output.SetCardinality(chunk_size);
 	};
 
-	TableFunction info_func("annsearch_index_info", {}, info_scan, info_bind, info_init);
+	TableFunction info_func("ann_index_info", {}, info_scan, info_bind, info_init);
 	loader.RegisterFunction(info_func);
 }
 

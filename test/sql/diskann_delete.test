@@ -2,7 +2,7 @@
 # description: Comprehensive DELETE tests for DiskANN BoundIndex
 # group: [diskann]
 
-require annsearch
+require ann
 
 # ========================================
 # Setup: create table with 10 vectors

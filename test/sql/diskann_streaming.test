@@ -2,7 +2,7 @@
 # description: DiskANN streaming build recall test - verifies ANN recall quality
 # group: [diskann]
 
-require annsearch
+require ann
 
 # ========================================
 # Generate deterministic random vectors

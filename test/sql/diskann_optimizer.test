@@ -2,7 +2,7 @@
 # description: Test ANN optimizer rewrite (ORDER BY array_distance LIMIT k)
 # group: [diskann]
 
-require annsearch
+require ann
 
 # Create table with vectors
 statement ok

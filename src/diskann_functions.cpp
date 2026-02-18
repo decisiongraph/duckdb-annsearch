@@ -1,4 +1,4 @@
-#include "annsearch_extension.hpp"
+#include "ann_extension.hpp"
 #include "diskann_index.hpp"
 #include "rust_ffi.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"

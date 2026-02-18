@@ -30,6 +30,12 @@ int32_t DiskannDetachedSearch(DiskannHandle handle, const float *query, int32_t 
 // Get vector count.
 int64_t DiskannDetachedCount(DiskannHandle handle);
 
+// Multi-query batch search on detached index. Returns 0 on success, -1 on error.
+// Uses GPU-accelerated lock-step BFS when Metal is available and batch is large enough.
+int32_t DiskannDetachedSearchBatch(DiskannHandle handle, const float *query_matrix, int32_t nq, int32_t dimension,
+                                   int32_t k, int32_t search_complexity, int64_t *out_labels, float *out_distances,
+                                   int32_t *out_counts);
+
 // Serialize detached index to bytes. Caller must free with DiskannFreeSerializedBytes.
 struct DiskannSerializedData {
 	uint8_t *data;
@@ -85,5 +91,20 @@ DiskannStreamingBuildResult DiskannStreamingBuild(const std::string &input_path,
 // SQ8 Quantization
 void DiskannDetachedQuantizeSQ8(DiskannHandle handle);
 bool DiskannDetachedIsQuantized(DiskannHandle handle);
+
+// ========================================
+// Batch search (multi-query, GPU-accelerated for DiskIndex)
+// ========================================
+
+struct DiskannBatchSearchResult {
+	std::vector<int64_t> labels;  // nq * k (row-major, -1 for unfilled)
+	std::vector<float> distances; // nq * k (row-major, MAX for unfilled)
+	std::vector<int32_t> counts;  // nq — actual result count per query
+};
+
+// Multi-query batch search via global registry index.
+// Uses GPU-accelerated lock-step search for DiskIndex, sequential for InMemoryIndex.
+DiskannBatchSearchResult DiskannBatchSearch(const std::string &name, const float *query_matrix, int32_t nq,
+                                            int32_t dimension, int32_t k, int32_t search_complexity);
 
 } // namespace duckdb

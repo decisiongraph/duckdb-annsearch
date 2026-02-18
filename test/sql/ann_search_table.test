@@ -1,0 +1,135 @@
+# name: test/sql/ann_search_table.test
+# description: Test ann_search_table streaming TABLE-input batch search
+# group: [diskann]
+
+require ann
+
+# Create table with vectors
+statement ok
+CREATE TABLE docs (id INT, embedding FLOAT[3]);
+
+statement ok
+INSERT INTO docs VALUES
+  (1, [1.0, 0.0, 0.0]),
+  (2, [0.0, 1.0, 0.0]),
+  (3, [0.0, 0.0, 1.0]),
+  (4, [0.5, 0.5, 0.0]),
+  (5, [0.0, 0.5, 0.5]);
+
+statement ok
+CREATE INDEX docs_idx ON docs USING DISKANN (embedding);
+
+# ========================================
+# Basic: literal subquery
+# ========================================
+
+# Single query via subquery, k=2
+query IIR
+SELECT id, embedding, _distance
+FROM ann_search_table(
+    (SELECT [1.0, 0.0, 0.0]::FLOAT[3] AS qvec),
+    'docs', 'docs_idx', 2)
+ORDER BY _distance, id;
+----
+1	[1.0, 0.0, 0.0]	0.0
+4	[0.5, 0.5, 0.0]	0.5
+
+# Two queries via VALUES
+query IIR
+SELECT id, embedding, _distance
+FROM ann_search_table(
+    (VALUES ([1.0, 0.0, 0.0]::FLOAT[3]), ([0.0, 1.0, 0.0]::FLOAT[3])),
+    'docs', 'docs_idx', 1)
+ORDER BY _distance, id;
+----
+1	[1.0, 0.0, 0.0]	0.0
+2	[0.0, 1.0, 0.0]	0.0
+
+# ========================================
+# Subquery with generate_series
+# ========================================
+
+# Use generate_series to make query vectors programmatically
+query I
+SELECT count(*)
+FROM ann_search_table(
+    (SELECT [i::FLOAT / 3.0, (3.0 - i)::FLOAT / 3.0, 0.0]::FLOAT[3] AS qvec FROM generate_series(0, 2) t(i)),
+    'docs', 'docs_idx', 2);
+----
+6
+
+# ========================================
+# Input columns pass through
+# ========================================
+
+# Input columns from subquery are preserved in output
+query TIIR
+SELECT qname, id, embedding, _distance
+FROM ann_search_table(
+    (SELECT 'near_x' AS qname, [1.0, 0.0, 0.0]::FLOAT[3] AS qvec),
+    'docs', 'docs_idx', 2)
+ORDER BY _distance;
+----
+near_x	1	[1.0, 0.0, 0.0]	0.0
+near_x	4	[0.5, 0.5, 0.0]	0.5
+
+# ========================================
+# CTE as input
+# ========================================
+
+query IIR
+WITH queries AS (
+    SELECT [0.0, 0.0, 1.0]::FLOAT[3] AS qvec
+)
+SELECT id, embedding, _distance
+FROM ann_search_table((SELECT * FROM queries), 'docs', 'docs_idx', 2)
+ORDER BY _distance, id;
+----
+3	[0.0, 0.0, 1.0]	0.0
+5	[0.0, 0.5, 0.5]	0.5
+
+# ========================================
+# LIST(FLOAT) input (not just FLOAT[N])
+# ========================================
+
+query IR
+SELECT id, _distance
+FROM ann_search_table(
+    (SELECT [0.0, 1.0, 0.0] AS qvec),
+    'docs', 'docs_idx', 2)
+ORDER BY _distance, id;
+----
+2	0.0
+5	0.5
+
+# ========================================
+# Error: no vector column in input
+# ========================================
+
+statement error
+SELECT * FROM ann_search_table(
+    (SELECT 42 AS x),
+    'docs', 'docs_idx', 2);
+----
+ann_search_table: input table must have a numeric LIST or ARRAY column for queries
+
+# ========================================
+# Error: bad index name
+# ========================================
+
+statement error
+SELECT * FROM ann_search_table(
+    (SELECT [1.0, 0.0, 0.0]::FLOAT[3] AS qvec),
+    'docs', 'no_such_idx', 2);
+----
+ANN index 'no_such_idx' not found
+
+# ========================================
+# Clean up
+# ========================================
+
+statement ok
+DROP INDEX docs_idx;
+
+statement ok
+DROP TABLE docs;

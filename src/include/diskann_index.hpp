@@ -98,6 +98,10 @@ public:
 	// ANN search (called by optimizer/index scan)
 	vector<pair<row_t, float>> Search(const float *query, int32_t dimension, int32_t k, int32_t search_complexity);
 
+	// Batch ANN search: multiple queries. Returns per-query results.
+	vector<vector<pair<row_t, float>>> SearchBatch(const vector<vector<float>> &queries, int32_t k,
+	                                               int32_t search_complexity);
+
 	int32_t GetDimension() const {
 		return dimension_;
 	}

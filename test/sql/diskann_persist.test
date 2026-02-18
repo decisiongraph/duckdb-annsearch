@@ -2,7 +2,7 @@
 # description: Test DiskANN BoundIndex persistence across restart with search
 # group: [diskann]
 
-require annsearch
+require ann
 
 load __TEST_DIR__/diskann_persist.db
 

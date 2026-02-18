@@ -1,6 +1,6 @@
 #define DUCKDB_EXTENSION_MAIN
 
-#include "annsearch_extension.hpp"
+#include "ann_extension.hpp"
 #include "diskann_index.hpp"
 #include "duckdb.hpp"
 #include "duckdb/execution/index/index_type.hpp"
@@ -51,7 +51,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterAnnSearchFunction(loader);
 
 	// Unified listing (always available)
-	RegisterAnnsearchListFunction(loader);
+	RegisterAnnListFunction(loader);
 
 	// Extension settings
 	auto &config = DBConfig::GetConfig(db);
@@ -63,17 +63,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterAnnOptimizer(db);
 }
 
-void AnnsearchExtension::Load(ExtensionLoader &loader) {
+void AnnExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
 
-std::string AnnsearchExtension::Name() {
-	return "annsearch";
+std::string AnnExtension::Name() {
+	return "ann";
 }
 
-std::string AnnsearchExtension::Version() const {
-#ifdef EXT_VERSION_ANNSEARCH
-	return EXT_VERSION_ANNSEARCH;
+std::string AnnExtension::Version() const {
+#ifdef EXT_VERSION_ANN
+	return EXT_VERSION_ANN;
 #else
 	return "";
 #endif
@@ -83,7 +83,7 @@ std::string AnnsearchExtension::Version() const {
 
 extern "C" {
 
-DUCKDB_CPP_EXTENSION_ENTRY(annsearch, loader) {
+DUCKDB_CPP_EXTENSION_ENTRY(ann, loader) {
 	duckdb::LoadInternal(loader);
 }
 }

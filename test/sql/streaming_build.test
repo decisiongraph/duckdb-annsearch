@@ -2,7 +2,7 @@
 # description: Test diskann_streaming_build function error handling
 # group: [diskann]
 
-require annsearch
+require ann
 
 # ========================================
 # Non-existent input file

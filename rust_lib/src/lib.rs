@@ -3,6 +3,7 @@ pub mod distance;
 pub mod ffi;
 pub mod file_format;
 pub mod index_manager;
+pub mod metal_ffi;
 pub mod provider;
 pub mod runtime;
 pub mod streaming_build;

@@ -1,4 +1,4 @@
-# annsearch — ANN Vector Indexes for DuckDB
+# ann — ANN Vector Indexes for DuckDB
 
 DuckDB extension providing approximate nearest neighbor (ANN) vector indexes using **DiskANN** and **FAISS**. Indexes are stored inside the `.duckdb` file, survive restarts, and integrate with the query optimizer.
 
@@ -63,9 +63,13 @@ CREATE INDEX idx ON table USING FAISS (column) WITH (type='Flat', gpu=true);
 | `description` | VARCHAR | | FAISS `index_factory` string (advanced, overrides `type`) |
 | `gpu` | BOOLEAN | false | Upload index to GPU for search |
 
-## GPU Acceleration
+## GPU Acceleration (Metal)
 
-FAISS indexes support GPU-accelerated search on macOS via Metal. The GPU backend handles both `IndexFlat` and `IndexIVFFlat`.
+On macOS with Apple Silicon, the extension uses Metal GPU compute shaders for accelerated distance computation. Two acceleration paths exist:
+
+### FAISS GPU
+
+FAISS indexes support GPU-accelerated search. The GPU backend handles both `IndexFlat` and `IndexIVFFlat`.
 
 ```sql
 -- Check GPU availability
@@ -84,7 +88,65 @@ CREATE INDEX gpu_idx ON docs USING FAISS (embedding) WITH (gpu=true);
 - The `gpu` flag is persisted, so the index re-uploads on database reopen
 - Falls back to CPU transparently if no GPU is available
 
-**Requirements:** Build with `FAISS_AVAILABLE` and `FAISS_METAL_ENABLED` (requires Xcode + faiss-metal).
+### DiskANN Metal Distance
+
+The disk-backed DiskANN search path (`DiskProvider`) can dispatch batch distance computations to the Metal GPU. This auto-activates when the batch is large enough to amortize GPU dispatch overhead (~450us per command buffer on Apple Silicon).
+
+Currently effective for multi-query batching scenarios where many queries' neighbor distances are aggregated into a single GPU dispatch. Per-iteration graph traversal (32-128 neighbors) uses CPU NEON SIMD which is faster at those sizes.
+
+### Metal Architecture
+
+```mermaid
+graph TD
+    subgraph "DuckDB Extension (C++)"
+        SQL["SQL Query"]
+        OPT["Query Optimizer"]
+        BI["BoundIndex<br/>(CREATE INDEX)"]
+        FAISS_GPU["FAISS Metal Backend<br/>gpu_backend_metal.mm"]
+    end
+
+    subgraph "Rust Static Library"
+        IMI["InMemoryIndex<br/>(diskann crate)"]
+        DP["DiskProvider<br/>(mmap search)"]
+        MFFI["metal_ffi.rs<br/>(FFI bridge)"]
+    end
+
+    subgraph "Metal GPU"
+        MB["metal_diskann_bridge.mm<br/>(ObjC++ bridge)"]
+        SHADER["diskann_distance.metal<br/>(L2 / IP kernels)"]
+        FAISS_SHADER["faiss-metal shaders<br/>(GEMM, fused L2+top-k)"]
+        METALLIB["faiss_metal.metallib"]
+    end
+
+    SQL --> OPT
+    OPT -->|"ORDER BY dist LIMIT k"| BI
+    BI -->|"DISKANN"| IMI
+    BI -->|"FAISS gpu=true"| FAISS_GPU
+    FAISS_GPU --> FAISS_SHADER
+    DP -->|"n*dim >= 524K"| MFFI
+    DP -->|"n*dim < 524K"| CPU["CPU NEON SIMD"]
+    MFFI -->|"extern C"| MB
+    MB --> SHADER
+    SHADER --> METALLIB
+    FAISS_SHADER --> METALLIB
+```
+
+### Benchmark Results (Apple M1 Pro)
+
+Batch L2 distance: one query vs N candidate vectors.
+
+| n | dim | n*dim | CPU (us) | GPU no-copy (us) | GPU speedup |
+|---|-----|-------|----------|-------------------|-------------|
+| 64 | 128 | 8K | 4 | 448 | 0.01x |
+| 64 | 768 | 49K | 53 | 453 | 0.12x |
+| 128 | 1536 | 197K | 210 | 495 | 0.42x |
+| 256 | 1536 | 393K | 424 | 415 | **1.02x** |
+| 512 | 1536 | 786K | 870 | 380 | **2.29x** |
+| 1024 | 768 | 786K | 784 | 532 | **1.47x** |
+
+GPU wins at n*dim >= ~400K. DiskANN per-iteration batches (64-128 neighbors) are too small. Future work: aggregate distances from multiple concurrent queries into a single GPU dispatch.
+
+**Requirements:** macOS with Apple Silicon, Xcode, `FAISS_METAL_ENABLED` (auto-detected at build time).
 
 ## Automatic Optimizer
 
@@ -128,13 +190,13 @@ SELECT row_id, distance FROM diskann_index_scan('docs', 'docs_ann', [0.1, ...]::
 -- Returns: (BIGINT row_id, FLOAT distance)
 ```
 
-### `annsearch_list` / `annsearch_index_info` — Diagnostics
+### `ann_list` / `ann_index_info` — Diagnostics
 
 ```sql
-SELECT * FROM annsearch_list();
+SELECT * FROM ann_list();
 -- name | engine  | table_name
 
-SELECT * FROM annsearch_index_info();
+SELECT * FROM ann_index_info();
 -- name | engine | table_name | num_vectors | num_deleted | memory_bytes | quantized
 ```
 
@@ -153,8 +215,8 @@ Input format: `[u32 num_vectors][u32 dimension][f32 * N * D]` (little-endian).
 
 ```bash
 # Clone with submodules
-git clone --recursive https://github.com/decisiongraph/duckdb-annsearch
-cd duckdb-annsearch
+git clone --recursive https://github.com/decisiongraph/duckdb-ann
+cd duckdb-ann
 
 # Build (DiskANN always, FAISS if available)
 make release GEN=ninja

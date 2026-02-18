@@ -2,7 +2,7 @@
 # description: Advanced DiskANN BoundIndex tests: custom params, edge cases, larger dataset
 # group: [diskann]
 
-require annsearch
+require ann
 
 # ========================================
 # Custom index parameters

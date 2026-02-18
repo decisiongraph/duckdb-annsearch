@@ -5,10 +5,10 @@
 # Bug: FAISS indexes existed in the catalog after restart but weren't
 # materialized (Bind'd), causing "index not found" or silent failures
 # in faiss_index_scan, ann_search, ann_search_batch, optimizer rewrite,
-# and annsearch_index_info. Fixed by adding indexes.Bind() calls for
+# and ann_index_info. Fixed by adding indexes.Bind() calls for
 # FaissIndex::TYPE_NAME in all code paths.
 
-require annsearch
+require ann
 
 load __TEST_DIR__/faiss_bind_regression.db
 
@@ -95,12 +95,12 @@ LIMIT 2;
 4	0.70710677
 
 # ----------------------------------------
-# Path 5: annsearch_index_info (annsearch_list.cpp)
+# Path 5: ann_index_info (ann_list.cpp)
 # Must return stats, not zeros, proving Bind materialized the index
 # ----------------------------------------
 query IIIIIII
 SELECT name, engine, table_name, num_vectors, num_deleted, memory_bytes > 0 AS has_mem, quantized
-FROM annsearch_index_info()
+FROM ann_index_info()
 WHERE name = 'faiss_idx';
 ----
 faiss_idx	FAISS	items	5	0	true	false

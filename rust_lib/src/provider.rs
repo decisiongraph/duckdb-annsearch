@@ -240,6 +240,305 @@ impl Provider {
         size
     }
 
+    /// Lock-step multi-query batch search with GPU acceleration.
+    ///
+    /// Holds the vectors read lock once for the entire search. Aggregates
+    /// neighbor distance work across all queries and dispatches to Metal GPU
+    /// when total work exceeds MIN_GPU_WORK. Falls back to CPU SIMD otherwise.
+    pub fn search_batch(
+        &self,
+        queries: &[&[f32]],
+        k: usize,
+        l_search: usize,
+        metric: crate::index_manager::Metric,
+    ) -> Vec<Vec<(u64, f32)>> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        let nq = queries.len();
+        if nq == 0 || self.len() == 0 || k == 0 {
+            return vec![Vec::new(); nq];
+        }
+
+        // Single query: skip lock-step overhead
+        if nq == 1 {
+            return vec![self.search_single(queries[0], k, l_search, metric)];
+        }
+
+        let k = k.min(self.len());
+        let l = l_search.max(k);
+        let dim = self.0.dimension;
+        let metric_code: u8 = match metric {
+            crate::index_manager::Metric::L2 => 0,
+            crate::index_manager::Metric::InnerProduct => 1,
+        };
+
+        // Per-query state
+        struct QState {
+            visited: hashbrown::HashSet<u32>,
+            candidates: BinaryHeap<Reverse<(FloatOrd, u32)>>,
+            result: Vec<(f32, u32)>,
+            active: bool,
+        }
+
+        let mut states: Vec<QState> = (0..nq)
+            .map(|_| QState {
+                visited: hashbrown::HashSet::with_capacity(l * 2),
+                candidates: BinaryHeap::new(),
+                result: Vec::new(),
+                active: true,
+            })
+            .collect();
+
+        // Hold vectors read lock for entire search
+        let vecs = self.0.vectors.read();
+        let n_vecs = self.0.count.load(std::sync::atomic::Ordering::Relaxed);
+        let entry_points = self.0.start_point_ids.read().clone();
+
+        // Helper: get vector slice from locked vecs
+        let get_vec = |id: u32| -> Option<&[f32]> {
+            let offset = id as usize * dim;
+            let end = offset + dim;
+            if end <= vecs.len() {
+                Some(&vecs[offset..end])
+            } else {
+                None
+            }
+        };
+
+        // Seed entry points
+        for (qi, state) in states.iter_mut().enumerate() {
+            for &ep in &entry_points {
+                if state.visited.insert(ep) {
+                    if let Some(vec) = get_vec(ep) {
+                        let dist = crate::distance::compute_distance(metric, queries[qi], vec);
+                        state.candidates.push(Reverse((FloatOrd(dist), ep)));
+                        state.result.push((dist, ep));
+                    }
+                }
+            }
+            state.result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        }
+
+        // Flat queries buffer for GPU
+        let queries_flat: Vec<f32> = queries.iter().flat_map(|q| q.iter().copied()).collect();
+
+        // Scratch buffers
+        let max_per_iter = nq * self.0.max_degree;
+        let mut all_neighbor_ids: Vec<u32> = Vec::with_capacity(max_per_iter);
+        let mut all_query_map: Vec<u32> = Vec::with_capacity(max_per_iter);
+        let mut batch_buf: Vec<f32> = Vec::with_capacity(max_per_iter * dim);
+        let mut batch_dist: Vec<f32> = Vec::with_capacity(max_per_iter);
+
+        loop {
+            let active_count = states.iter().filter(|s| s.active).count();
+            if active_count == 0 {
+                break;
+            }
+
+            all_neighbor_ids.clear();
+            all_query_map.clear();
+
+            for (qi, state) in states.iter_mut().enumerate() {
+                if !state.active {
+                    continue;
+                }
+
+                match state.candidates.pop() {
+                    None => {
+                        state.active = false;
+                        continue;
+                    }
+                    Some(Reverse((FloatOrd(c_dist), c_id))) => {
+                        if state.result.len() >= l && c_dist > state.result[l - 1].0 {
+                            state.active = false;
+                            continue;
+                        }
+
+                        if let Some(adj) = self.0.adjacency.get(&c_id) {
+                            let neighbors: &[u32] = &*adj;
+                            for &neighbor in neighbors {
+                                if neighbor >= n_vecs {
+                                    continue;
+                                }
+                                if !state.visited.insert(neighbor) {
+                                    continue;
+                                }
+                                if get_vec(neighbor).is_none() {
+                                    continue;
+                                }
+                                all_neighbor_ids.push(neighbor);
+                                all_query_map.push(qi as u32);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if all_neighbor_ids.is_empty() {
+                continue;
+            }
+
+            let total_n = all_neighbor_ids.len();
+
+            // GPU path
+            let use_gpu = total_n * dim >= crate::metal_ffi::MIN_GPU_WORK;
+            if use_gpu {
+                batch_buf.clear();
+                batch_buf.reserve(total_n * dim);
+                for &id in &all_neighbor_ids {
+                    if let Some(v) = get_vec(id) {
+                        batch_buf.extend_from_slice(v);
+                    }
+                }
+                batch_dist.resize(total_n, 0.0);
+
+                let gpu_ok = crate::metal_ffi::metal_multi_batch_distances(
+                    &queries_flat,
+                    &batch_buf,
+                    &all_query_map,
+                    total_n,
+                    nq,
+                    dim,
+                    metric_code,
+                    &mut batch_dist,
+                );
+
+                if gpu_ok {
+                    for i in 0..total_n {
+                        let qi = all_query_map[i] as usize;
+                        let state = &mut states[qi];
+                        Self::insert_result_batch(&mut state.result, &mut state.candidates, l, batch_dist[i], all_neighbor_ids[i]);
+                    }
+                    continue;
+                }
+            }
+
+            // CPU fallback
+            for i in 0..total_n {
+                let qi = all_query_map[i] as usize;
+                let neighbor = all_neighbor_ids[i];
+                if let Some(vec) = get_vec(neighbor) {
+                    let dist = crate::distance::compute_distance(metric, queries[qi], vec);
+                    let state = &mut states[qi];
+                    Self::insert_result_batch(&mut state.result, &mut state.candidates, l, dist, neighbor);
+                }
+            }
+        }
+
+        states
+            .into_iter()
+            .map(|state| {
+                state
+                    .result
+                    .into_iter()
+                    .take(k)
+                    .map(|(dist, id)| (id as u64, dist))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Single-query search (used by search_batch for nq=1 and by InMemoryIndex).
+    fn search_single(
+        &self,
+        query: &[f32],
+        k: usize,
+        l_search: usize,
+        metric: crate::index_manager::Metric,
+    ) -> Vec<(u64, f32)> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        let n = self.len();
+        if n == 0 || k == 0 {
+            return Vec::new();
+        }
+
+        let k = k.min(n);
+        let l = l_search.max(k);
+        let dim = self.0.dimension;
+
+        let vecs = self.0.vectors.read();
+        let n_vecs = self.0.count.load(std::sync::atomic::Ordering::Relaxed);
+        let entry_points = self.0.start_point_ids.read().clone();
+
+        let get_vec = |id: u32| -> Option<&[f32]> {
+            let offset = id as usize * dim;
+            let end = offset + dim;
+            if end <= vecs.len() {
+                Some(&vecs[offset..end])
+            } else {
+                None
+            }
+        };
+
+        let mut visited = hashbrown::HashSet::with_capacity(l * 2);
+        let mut candidates: BinaryHeap<Reverse<(FloatOrd, u32)>> = BinaryHeap::new();
+        let mut result: Vec<(f32, u32)> = Vec::new();
+
+        for &ep in &entry_points {
+            if visited.insert(ep) {
+                if let Some(vec) = get_vec(ep) {
+                    let dist = crate::distance::compute_distance(metric, query, vec);
+                    candidates.push(Reverse((FloatOrd(dist), ep)));
+                    result.push((dist, ep));
+                }
+            }
+        }
+        result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        while let Some(Reverse((FloatOrd(c_dist), c_id))) = candidates.pop() {
+            if result.len() >= l && c_dist > result[l - 1].0 {
+                break;
+            }
+
+            if let Some(adj) = self.0.adjacency.get(&c_id) {
+                let neighbors: &[u32] = &*adj;
+                for &neighbor in neighbors {
+                    if neighbor >= n_vecs {
+                        continue;
+                    }
+                    if !visited.insert(neighbor) {
+                        continue;
+                    }
+                    if let Some(vec) = get_vec(neighbor) {
+                        let dist = crate::distance::compute_distance(metric, query, vec);
+                        Self::insert_result_batch(&mut result, &mut candidates, l, dist, neighbor);
+                    }
+                }
+            }
+        }
+
+        result
+            .into_iter()
+            .take(k)
+            .map(|(dist, id)| (id as u64, dist))
+            .collect()
+    }
+
+    #[inline]
+    fn insert_result_batch(
+        result: &mut Vec<(f32, u32)>,
+        candidates: &mut std::collections::BinaryHeap<std::cmp::Reverse<(FloatOrd, u32)>>,
+        l: usize,
+        dist: f32,
+        neighbor: u32,
+    ) {
+        if result.len() < l || dist < result[result.len() - 1].0 {
+            let pos = result
+                .binary_search_by(|probe| {
+                    probe.0.partial_cmp(&dist).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_else(|e| e);
+            result.insert(pos, (dist, neighbor));
+            if result.len() > l {
+                result.truncate(l);
+            }
+            candidates.push(std::cmp::Reverse((FloatOrd(dist), neighbor)));
+        }
+    }
+
     pub fn dim(&self) -> usize {
         self.0.dimension
     }
@@ -660,5 +959,26 @@ impl glue::InsertStrategy<Provider, [f32]> for FullPrecisionStrategy {
         _context: &'a DefaultContext,
     ) -> Result<Self::SearchAccessor<'a>, Self::SearchAccessorError> {
         Ok(ProviderAccessor::new(&provider.0))
+    }
+}
+
+// ==================
+// FloatOrd (for BinaryHeap)
+// ==================
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FloatOrd(f32);
+
+impl Eq for FloatOrd {}
+
+impl PartialOrd for FloatOrd {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FloatOrd {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
     }
 }

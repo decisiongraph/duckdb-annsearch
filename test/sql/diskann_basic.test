@@ -2,7 +2,7 @@
 # description: Test basic DiskANN BoundIndex functionality
 # group: [diskann]
 
-require annsearch
+require ann
 
 # Create table with vectors
 statement ok

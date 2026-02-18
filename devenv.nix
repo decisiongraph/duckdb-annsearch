@@ -61,6 +61,21 @@ in
     export VCPKG_TOOLCHAIN_PATH="$VCPKG_DIR/scripts/buildsystems/vcpkg.cmake"
   '';
 
+  claude.code.enable = true;
+
+  claude.code.mcpServers.consult-llm = {
+    type = "stdio";
+    command = "npx";
+    args = [
+      "-y"
+      "consult-llm-mcp"
+    ];
+    env = {
+      CONSULT_LLM_DEFAULT_MODEL = "gemini-3-pro-preview";
+      CONSULT_LLM_ALLOWED_MODELS = "gemini-3-pro-preview";
+    };
+  };
+
   git-hooks.hooks = {
     ripsecrets.enable = true;
     clang-format = {

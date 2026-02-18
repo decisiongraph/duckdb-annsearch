@@ -1,7 +1,7 @@
 // ANN index scan optimizer: rewrites ORDER BY array_distance(...) LIMIT k
 // to use DISKANN/FAISS index scan instead of full table scan.
 
-#include "annsearch_extension.hpp"
+#include "ann_extension.hpp"
 #include "diskann_index.hpp"
 
 #ifdef FAISS_AVAILABLE

@@ -1,6 +1,6 @@
 #ifdef FAISS_AVAILABLE
 
-#include "annsearch_extension.hpp"
+#include "ann_extension.hpp"
 #include "gpu_backend.hpp"
 #include "duckdb/function/table_function.hpp"
 

@@ -2,7 +2,7 @@
 # description: Test basic FAISS index functionality (Flat, HNSW, IVFFlat)
 # group: [faiss]
 
-require annsearch
+require ann
 
 # ========================================
 # Flat index (default)
@@ -26,9 +26,9 @@ SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'flat_idx';
 ----
 1
 
-# Verify it shows up in annsearch_list
+# Verify it shows up in ann_list
 query III
-SELECT * FROM annsearch_list() WHERE name = 'flat_idx';
+SELECT * FROM ann_list() WHERE name = 'flat_idx';
 ----
 flat_idx	FAISS	vectors
 
@@ -162,7 +162,7 @@ CREATE INDEX vac_idx ON vac_vectors USING FAISS (embedding);
 
 # Verify 5 vectors indexed
 query I
-SELECT num_vectors FROM annsearch_index_info() WHERE name = 'vac_idx';
+SELECT num_vectors FROM ann_index_info() WHERE name = 'vac_idx';
 ----
 5
 
@@ -186,7 +186,7 @@ VACUUM vac_vectors;
 
 # After vacuum: vector count should drop to 3
 query I
-SELECT num_vectors FROM annsearch_index_info() WHERE name = 'vac_idx';
+SELECT num_vectors FROM ann_index_info() WHERE name = 'vac_idx';
 ----
 3
 
@@ -202,7 +202,7 @@ ORDER BY s.distance;
 
 # Deleted count should be 0 after vacuum
 query I
-SELECT num_deleted FROM annsearch_index_info() WHERE name = 'vac_idx';
+SELECT num_deleted FROM ann_index_info() WHERE name = 'vac_idx';
 ----
 0
 

@@ -2,7 +2,7 @@
 # description: Test FAISS index persistence across checkpoint/restart
 # group: [faiss]
 
-require annsearch
+require ann
 
 load __TEST_DIR__/faiss_persist.db
 
@@ -51,9 +51,9 @@ SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'persist_idx';
 ----
 1
 
-# Check via annsearch_list
+# Check via ann_list
 query III
-SELECT * FROM annsearch_list() WHERE name = 'persist_idx';
+SELECT * FROM ann_list() WHERE name = 'persist_idx';
 ----
 persist_idx	FAISS	vectors
 

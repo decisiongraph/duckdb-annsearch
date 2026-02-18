@@ -81,8 +81,6 @@ dependencies = [
 [[package]]
 name = "diskann"
 version = "0.45.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52046f3e2d811ff08d458ddc649aaecddf2ba404c60086e556fb09436f3a9f4f"
 dependencies = [
  "anyhow",
  "bytemuck",

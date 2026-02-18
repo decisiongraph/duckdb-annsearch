@@ -2,7 +2,7 @@
 # description: Test FAISS IVFFlat index type with training, nprobe, description
 # group: [faiss]
 
-require annsearch
+require ann
 
 # ========================================
 # IVFFlat with ivf_nlist and nprobe

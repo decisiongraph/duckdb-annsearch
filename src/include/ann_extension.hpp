@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-class AnnsearchExtension : public Extension {
+class AnnExtension : public Extension {
 public:
 	void Load(ExtensionLoader &loader) override;
 	std::string Name() override;
@@ -19,7 +19,7 @@ void RegisterDiskannStreamingBuildFunction(ExtensionLoader &loader);
 void RegisterAnnSearchFunction(ExtensionLoader &loader);
 
 // Unified listing
-void RegisterAnnsearchListFunction(ExtensionLoader &loader);
+void RegisterAnnListFunction(ExtensionLoader &loader);
 
 // Optimizer: ORDER BY array_distance(...) LIMIT k → ANN index scan
 void RegisterAnnOptimizer(DatabaseInstance &db);

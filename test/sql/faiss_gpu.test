@@ -2,7 +2,7 @@
 # description: Test FAISS GPU info function and gpu=true/false flag
 # group: [faiss]
 
-require annsearch
+require ann
 
 # ========================================
 # faiss_gpu_info() always returns a row

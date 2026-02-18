@@ -1,12 +1,12 @@
-# name: test/sql/annsearch_list.test
-# description: Test annsearch_list function lists ANN indexes from catalog
-# group: [annsearch]
+# name: test/sql/ann_list.test
+# description: Test ann_list function lists ANN indexes from catalog
+# group: [ann]
 
-require annsearch
+require ann
 
 # Initially empty
 query I
-SELECT count(*) FROM annsearch_list();
+SELECT count(*) FROM ann_list();
 ----
 0
 
@@ -20,9 +20,9 @@ INSERT INTO test_list VALUES (1, [1.0, 0.0, 0.0]), (2, [0.0, 1.0, 0.0]);
 statement ok
 CREATE INDEX test_idx ON test_list USING DISKANN(vec);
 
-# annsearch_list should show the index
+# ann_list should show the index
 query III
-SELECT * FROM annsearch_list();
+SELECT * FROM ann_list();
 ----
 test_idx	DISKANN	test_list
 
@@ -31,6 +31,6 @@ statement ok
 DROP INDEX test_idx;
 
 query I
-SELECT count(*) FROM annsearch_list();
+SELECT count(*) FROM ann_list();
 ----
 0
