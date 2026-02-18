@@ -1,6 +1,7 @@
 // Rust DiskANN FFI wrapper for DuckDB extension (detached handle API only)
 
 #include "rust_ffi.hpp"
+#include <limits>
 #include <stdexcept>
 #include <string>
 
