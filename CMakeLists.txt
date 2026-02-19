@@ -129,7 +129,8 @@ endif()
 # ========================================
 
 set(FAISS_METAL_AVAILABLE OFF)
-if(FAISS_AVAILABLE AND APPLE)
+if(FAISS_AVAILABLE AND APPLE AND (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64"
+    OR CMAKE_OSX_ARCHITECTURES MATCHES "arm64"))
     find_library(METAL_FW Metal)
     find_library(MPS_FW MetalPerformanceShaders)
     if(METAL_FW AND MPS_FW)
